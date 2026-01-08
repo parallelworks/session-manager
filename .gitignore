@@ -1,0 +1,7 @@
+# Ignore sensitive configuration files
+config
+
+# Ignore editor files
+*~
+.*.swp
+*.swo

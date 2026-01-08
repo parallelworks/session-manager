@@ -1,0 +1,25 @@
+# Session Manager Configuration
+# Copy this file to ~/.config/session-manager/config and update with your values
+
+# Claude Code CLI Configuration
+# Uncomment and set your API token
+# export SESSION_MANAGER_ANTHROPIC_AUTH_TOKEN="your-token-here"
+
+# Optional: Custom API base URL
+# export SESSION_MANAGER_ANTHROPIC_BASE_URL="https://api.anthropic.com"
+# Example for GLM endpoint:
+# export SESSION_MANAGER_ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic"
+
+# Optional: API timeout in milliseconds
+# export SESSION_MANAGER_API_TIMEOUT_MS="3000000"
+
+# Optional: Model configurations
+# Default Claude models:
+# export SESSION_MANAGER_HAIKU_MODEL="claude-3-5-haiku"
+# export SESSION_MANAGER_SONNET_MODEL="claude-3-5-sonnet"
+# export SESSION_MANAGER_OPUS_MODEL="claude-3-opus"
+
+# Example GLM models:
+# export SESSION_MANAGER_HAIKU_MODEL="glm-4.5-air"
+# export SESSION_MANAGER_SONNET_MODEL="glm-4.7"
+# export SESSION_MANAGER_OPUS_MODEL="glm-4.7"
