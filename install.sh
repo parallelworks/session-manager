@@ -33,15 +33,30 @@ if [ -f "session-manager.README.md" ]; then
     cp "session-manager.README.md" "$INSTALL_DIR/"
 fi
 
+# Add to PATH if not already there
+if ! grep -q "$INSTALL_DIR" "$HOME/.bashrc" 2>/dev/null; then
+    echo ""
+    echo "Adding $INSTALL_DIR to PATH in ~/.bashrc"
+    echo "" >> "$HOME/.bashrc"
+    echo "# session-manager" >> "$HOME/.bashrc"
+    echo "export PATH=\"\$PATH:$INSTALL_DIR\"" >> "$HOME/.bashrc"
+fi
+
+# Add alias if not already there
+if ! grep -q "^alias sm=" "$HOME/.bashrc" 2>/dev/null; then
+    echo "Adding 'sm' alias to ~/.bashrc"
+    echo "alias sm='session-manager'" >> "$HOME/.bashrc"
+fi
+
 echo -e "${GREEN}Installation complete!${NC}"
 echo ""
-echo "Next steps:"
-echo "  1. Make sure $INSTALL_DIR is in your PATH:"
-echo "     export PATH=\"\$PATH:$INSTALL_DIR\""
+echo "Sourcing ~/.bashrc..."
+source "$HOME/.bashrc"
 echo ""
-echo "  2. Configure your environment variables:"
+echo "Next steps:"
+echo "  1. Configure your environment variables:"
 echo "     session-manager config"
 echo ""
 echo -e "${YELLOW}Note: Your config file will be created at $CONFIG_DIR/config${NC}"
 echo ""
-echo "Run 'session-manager' to get started."
+echo "You can now use 'session-manager' or the alias 'sm' to get started."
