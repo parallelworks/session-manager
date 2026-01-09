@@ -29,20 +29,32 @@ session-manager attach claude-myproject
 |-----|-------------|
 | `claude` | Claude Code CLI (configure with `session-manager config`) |
 | `bash` | Interactive bash shell |
-| `opencode` | OpenCode editor server |
+| `opencode` | OpenCode editor TUI |
 
 ## Command Line Interface
 
 ```bash
 session-manager <app> [name]           # Create or attach to <app> session
+session-manager <app> [name] [options] # Create session with options
 session-manager attach <name>          # Attach to specific session
 session-manager list                   # List all sessions
 session-manager list-apps              # List available apps
 session-manager kill <name>            # Kill a session
+session-manager info <name>            # Show session details
+session-manager restart <name>         # Restart a session
 session-manager config                 # Configure environment variables
+session-manager --version              # Show version
 session-manager                        # Interactive menu
 session-manager help                   # Show help
 ```
+
+### Command Options
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--detach` | `-d` | Create session without automatically attaching |
+| `--dir <path>` | `-D <path>` | Specify working directory for the session |
+| `--version` | `-V` | Show version information |
 
 ## Session Naming
 
@@ -71,9 +83,9 @@ register_app "appname" "command to run" \
 
 Edit `~/.local/bin/session-manager` and add in the "ADD YOUR CUSTOM APPS" section:
 
-```bash
-register_app "opencode" "opencode --server" \
-    "OpenCode editor server" \
+ ```bash
+register_app "opencode" "opencode" \
+    "OpenCode editor TUI" \
     ""
 ```
 
@@ -110,10 +122,10 @@ Run `session-manager` without arguments for an interactive menu:
 ║   Session Manager                     ║
 ╚════════════════════════════════════════╝
 
-Available apps:
-  claude  Claude Code CLI
-  bash    Interactive bash shell
-  opencode  OpenCode editor server
+ Available apps:
+   claude  Claude Code CLI
+   bash    Interactive bash shell
+  opencode  OpenCode editor TUI
 
 Running sessions: 2
 
@@ -138,6 +150,51 @@ Options:
 | List windows | `Ctrl+B` then `w` |
 | Rename session | `Ctrl+B` then `$` |
 
+## Advanced Usage
+
+### Session Information
+
+Use the `info` command to get detailed information about a session:
+
+```bash
+session-manager info claude-myproject
+```
+
+This shows:
+- Session status (attached/detached)
+- Working directory
+- Running windows
+
+### Session Management
+
+Create multiple sessions for different projects or tasks:
+
+```bash
+# Create sessions for different work contexts
+session-manager claude frontend --dir ~/projects/frontend
+session-manager claude backend --dir ~/projects/backend
+session-manager bash logs --dir ~/logs
+
+# List and manage them
+session-manager list
+
+# Restart a session when needed
+session-manager restart claude-frontend
+```
+
+### Detached Sessions
+
+Use `--detach` to create sessions that run in the background:
+
+```bash
+# Start a long-running task in background
+session-manager bash build --dir ~/myproject --detach
+
+# Check on it later
+session-manager list
+session-manager attach bash-build
+```
+
 ## Direct tmux Commands
 
 ```bash
@@ -149,6 +206,9 @@ tmux attach -t <name>
 
 # Kill session
 tmux kill-session -t <name>
+
+# Show session info
+tmux list-sessions -F "#{session_name}: #{?session_attached,(attached),(detached)} - #{window_name}"
 ```
 
 ## Examples
@@ -160,8 +220,20 @@ session-manager claude frontend
 # Start a bash session for quick commands
 session-manager bash shell1
 
+# Create a detached session (runs in background)
+session-manager claude myproject --detach
+
+# Create a session in a specific directory
+session-manager bash dev --dir ~/projects/myapp
+
 # Later, reattach to the frontend session
 session-manager attach claude-frontend
+
+# Show session details
+session-manager info claude-frontend
+
+# Restart a session (kill and recreate)
+session-manager restart claude-frontend
 
 # Or just use the app+name shortcut (auto-adds prefix)
 session-manager claude frontend

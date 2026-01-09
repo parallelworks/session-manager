@@ -3,6 +3,8 @@
 
 set -e
 
+VERSION="1.2.0"
+
 # =============================================================================
 # CONFIGURATION - Load config file if exists
 # =============================================================================
@@ -48,9 +50,9 @@ register_app "bash" "bash --login" \
     "Interactive bash shell" \
     ""
 
-# OpenCode editor server
-register_app "opencode" "opencode --server" \
-    "OpenCode editor server" \
+# OpenCode editor (terminal TUI)
+register_app "opencode" "opencode" \
+    "OpenCode editor TUI" \
     ""
 
 # Claude Code CLI - configure via env vars or config file
@@ -274,6 +276,8 @@ show_main_menu() {
     echo "  [4] Kill session"
     echo "  [5] List apps"
     echo "  [6] Configure"
+    echo "  [7] Session info"
+    echo "  [8] Restart session"
     echo "  [q] Quit"
     echo ""
 }
@@ -378,6 +382,76 @@ list_all_sessions() {
     echo ""
 }
 
+# Get session info
+show_session_info() {
+    local session_name="$1"
+
+    if ! tmux has-session -t "$session_name" 2>/dev/null; then
+        print_error "Session '$session_name' not found"
+        return 1
+    fi
+
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════${NC}"
+    echo -e "${CYAN}Session Info: $session_name${NC}"
+    echo -e "${CYAN}════════════════════════════════════════${NC}"
+    echo ""
+
+    # Get session details
+    local session_info=$(tmux list-sessions -F "#{session_name}: #{?session_attached,(attached),(detached)} - #{window_name}" 2>/dev/null | grep "^$session_name:")
+
+    if [ -n "$session_info" ]; then
+        echo "  Status: $session_info"
+    fi
+
+    # Get working directory
+    local work_dir=$(tmux display-message -p -t "$session_name" "#{pane_current_path}")
+    echo "  Working Directory: $work_dir"
+
+    # Get running command
+    local cmd=$(tmux send-keys -t "$session_name" 'echo $$' C-m 2>/dev/null && sleep 0.1 && tmux capture-pane -p -t "$session_name" | tail -1)
+    echo ""
+
+    # List windows
+    echo "  Windows:"
+    tmux list-windows -t "$session_name" 2>/dev/null | while read -r window; do
+        echo "    $window"
+    done
+    echo ""
+}
+
+# Restart session
+restart_session() {
+    local session_name="$1"
+
+    if ! tmux has-session -t "$session_name" 2>/dev/null; then
+        print_error "Session '$session_name' not found"
+        return 1
+    fi
+
+    print_info "Restarting session '$session_name'"
+
+    # Extract app name from session name (remove suffix after dash)
+    local app=$(echo "$session_name" | sed 's/-.*//')
+
+    # Get current working directory
+    local work_dir=$(tmux display-message -p -t "$session_name" "#{pane_current_path}")
+
+    # Kill and recreate
+    kill_session "$session_name"
+
+    # Check if app still exists
+    if [ -z "${APP_CMDS[$app]}" ]; then
+        print_warning "App '$app' no longer exists in registry"
+        return 1
+    fi
+
+    # Create new session
+    create_session "$app" "$session_name" "$work_dir"
+
+    print_success "Restarted session '$session_name'"
+}
+
 # =============================================================================
 # COMMAND LINE INTERFACE
 # =============================================================================
@@ -385,24 +459,36 @@ list_all_sessions() {
 show_help() {
     cat << 'EOF'
 Usage: session-manager <app> [name]           Create or attach to <app> session
+   or: session-manager <app> [name] [options]  Create session with options
    or: session-manager attach <name>          Attach to specific session
    or: session-manager list                   List all sessions
    or: session-manager list-apps              List available apps
    or: session-manager kill <name>            Kill a session
+   or: session-manager info <name>            Show session details
+   or: session-manager restart <name>         Restart a session
    or: session-manager config                 Configure environment variables
    or: session-manager                        Interactive menu
+   or: session-manager --version              Show version
+
+Options:
+  --detach, -d                        Create session without attaching
+  --dir <path>, -D <path>             Specify working directory
 
 Session naming pattern: <app>-<name>
 Example: session-manager claude myproject  →  creates session "claude-myproject"
 
 Examples:
-  session-manager claude myproject     Create/attach to claude session
-  session-manager bash scratch         Create/attach to bash session
-  session-manager list                 List all sessions
-  session-manager attach claude-myproject  Attach to specific session
-  session-manager kill claude-myproject    Kill a session
-  session-manager list-apps            List available apps
-  session-manager config               Configure app environment variables
+  session-manager claude myproject               Create/attach to claude session
+  session-manager claude myproject --detach      Create session without attaching
+  session-manager bash scratch -D ~/projects     Create bash session in specific directory
+  session-manager list                           List all sessions
+  session-manager attach claude-myproject        Attach to specific session
+  session-manager info claude-myproject          Show session details
+  session-manager restart claude-myproject       Restart a session
+  session-manager kill claude-myproject          Kill a session
+  session-manager list-apps                      List available apps
+  session-manager config                         Configure app environment variables
+  session-manager --version                      Show version
 
 Adding new apps:
   Edit the session-manager script and add a register_app call:
@@ -478,6 +564,19 @@ configure() {
 main() {
     check_tmux
 
+    # Handle global flags first
+    local detach=false
+    local work_dir="$PWD"
+
+    for arg in "$@"; do
+        case "$arg" in
+            --version|-V)
+                echo "session-manager version $VERSION"
+                exit 0
+                ;;
+        esac
+    done
+
     # No arguments - interactive mode
     if [ $# -eq 0 ]; then
         while true; do
@@ -506,6 +605,64 @@ main() {
                 6)
                     configure
                     read -p "Press Enter to continue..."
+                    ;;
+                7)
+                    echo ""
+                    print_info "Session Info"
+                    echo ""
+
+                    local sessions=($(tmux list-sessions 2>/dev/null | sed 's/:.*$//'))
+
+                    if [ ${#sessions[@]} -eq 0 ]; then
+                        print_warning "No running sessions found"
+                        read -p "Press Enter to continue..."
+                        continue
+                    fi
+
+                    echo "Running sessions:"
+                    local i=1
+                    for sess in "${sessions[@]}"; do
+                        echo "  [$i] $sess"
+                        ((i++))
+                    done
+                    echo ""
+
+                    read -p "Select session: " info_choice
+
+                    if [[ "$info_choice" =~ ^[0-9]+$ ]] && [ "$info_choice" -ge 1 ] && [ "$info_choice" -le "${#sessions[@]}" ]; then
+                        local selected="${sessions[$((info_choice-1))]}"
+                        show_session_info "$selected"
+                        read -p "Press Enter to continue..."
+                    fi
+                    ;;
+                8)
+                    echo ""
+                    print_info "Restart Session"
+                    echo ""
+
+                    local sessions=($(tmux list-sessions 2>/dev/null | sed 's/:.*$//'))
+
+                    if [ ${#sessions[@]} -eq 0 ]; then
+                        print_warning "No running sessions found"
+                        read -p "Press Enter to continue..."
+                        continue
+                    fi
+
+                    echo "Running sessions:"
+                    local i=1
+                    for sess in "${sessions[@]}"; do
+                        echo "  [$i] $sess"
+                        ((i++))
+                    done
+                    echo ""
+
+                    read -p "Select session to restart: " restart_choice
+
+                    if [[ "$restart_choice" =~ ^[0-9]+$ ]] && [ "$restart_choice" -ge 1 ] && [ "$restart_choice" -le "${#sessions[@]}" ]; then
+                        local selected="${sessions[$((restart_choice-1))]}"
+                        restart_session "$selected"
+                        read -p "Press Enter to continue..."
+                    fi
                     ;;
                 q|Q)
                     print_info "Goodbye!"
@@ -541,30 +698,91 @@ main() {
             exit 0
             ;;
         attach)
-            if [ $# -eq 0 ]; then
+            local attach_name="$1"
+
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --detach|-d)
+                        print_error "--detach flag not valid with attach command"
+                        exit 1
+                        ;;
+                esac
+                shift
+            done
+
+            if [ -z "$attach_name" ]; then
                 show_sessions
             else
-                attach_session "$1"
+                attach_session "$attach_name"
             fi
             exit 0
             ;;
         kill)
-            if [ $# -eq 0 ]; then
+            local kill_name="$1"
+            if [ -z "$kill_name" ]; then
                 kill_session_interactive
             else
-                kill_session "$1"
+                kill_session "$kill_name"
             fi
             exit 0
             ;;
+        info)
+            local info_name="$1"
+            if [ -z "$info_name" ]; then
+                print_error "Please specify a session name"
+                exit 1
+            fi
+            show_session_info "$info_name"
+            exit 0
+            ;;
+        restart)
+            local restart_name="$1"
+            if [ -z "$restart_name" ]; then
+                print_error "Please specify a session name"
+                exit 1
+            fi
+            restart_session "$restart_name"
+            exit 0
+            ;;
         *)
-            # Treat first arg as app name
+            # Treat first arg as app name, parse remaining args for flags
             local app="$cmd"
-            local session_name="$1"
+            local session_name=""
+            local args=("$@")
+
+            # Parse arguments
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --detach|-d)
+                        detach=true
+                        shift
+                        ;;
+                    --dir|-D)
+                        work_dir="$2"
+                        shift 2
+                        ;;
+                    *)
+                        if [ -z "$session_name" ]; then
+                            session_name="$1"
+                        fi
+                        shift
+                        ;;
+                esac
+            done
 
             # Validate app exists
             if [ -z "${APP_CMDS[$app]}" ]; then
                 print_error "Unknown app: $app"
                 print_info "Use 'session-manager list-apps' to see available apps."
+                exit 1
+            fi
+
+            # Expand tilde in path
+            work_dir="${work_dir/#\~/$HOME}"
+
+            # Validate directory exists
+            if [ ! -d "$work_dir" ]; then
+                print_error "Directory does not exist: $work_dir"
                 exit 1
             fi
 
@@ -580,8 +798,10 @@ main() {
                 print_info "Session '$session_name' already exists, attaching..."
                 attach_session "$session_name"
             else
-                create_session "$app" "$session_name" "$PWD"
-                attach_session "$session_name"
+                create_session "$app" "$session_name" "$work_dir"
+                if [ "$detach" = false ]; then
+                    attach_session "$session_name"
+                fi
             fi
             exit 0
             ;;
