@@ -14,7 +14,9 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${BLUE}Installing session-manager...${NC}"
+echo -e "${BLUE}Installing session-manager v2.1.0...${NC}"
+echo "Remote AgentDeck session manager via SSH"
+echo ""
 
 # Create directory if it doesn't exist
 if [ ! -d "$INSTALL_DIR" ]; then
@@ -27,36 +29,49 @@ echo "Copying $SCRIPT_NAME to $INSTALL_DIR"
 cp "$SCRIPT_NAME" "$INSTALL_DIR/"
 chmod +x "$SCRIPT_PATH"
 
+# Create symlink for 'sm' command
+echo "Creating 'sm' symlink"
+ln -sf "$SCRIPT_PATH" "$INSTALL_DIR/sm"
+
 # Copy README
 if [ -f "session-manager.README.md" ]; then
     echo "Copying README to $INSTALL_DIR"
     cp "session-manager.README.md" "$INSTALL_DIR/"
 fi
 
+# Detect shell config file
+SHELL_RC=""
+if [ -f "$HOME/.zshrc" ]; then
+    SHELL_RC="$HOME/.zshrc"
+elif [ -f "$HOME/.bashrc" ]; then
+    SHELL_RC="$HOME/.bashrc"
+elif [ -f "$HOME/.bash_profile" ]; then
+    SHELL_RC="$HOME/.bash_profile"
+fi
+
 # Add to PATH if not already there
-if ! grep -q "$INSTALL_DIR" "$HOME/.bashrc" 2>/dev/null; then
-    echo ""
-    echo "Adding $INSTALL_DIR to PATH in ~/.bashrc"
-    echo "" >> "$HOME/.bashrc"
-    echo "# session-manager" >> "$HOME/.bashrc"
-    echo "export PATH=\"\$PATH:$INSTALL_DIR\"" >> "$HOME/.bashrc"
+if [ -n "$SHELL_RC" ]; then
+    if ! grep -q "$INSTALL_DIR" "$SHELL_RC" 2>/dev/null; then
+        echo ""
+        echo "Adding $INSTALL_DIR to PATH in $SHELL_RC"
+        echo "" >> "$SHELL_RC"
+        echo "# session-manager" >> "$SHELL_RC"
+        echo "export PATH=\"\$PATH:$INSTALL_DIR\"" >> "$SHELL_RC"
+    fi
 fi
 
-# Add alias if not already there
-if ! grep -q "^alias sm=" "$HOME/.bashrc" 2>/dev/null; then
-    echo "Adding 'sm' alias to ~/.bashrc"
-    echo "alias sm='session-manager'" >> "$HOME/.bashrc"
-fi
-
+echo ""
 echo -e "${GREEN}Installation complete!${NC}"
 echo ""
-echo "Sourcing ~/.bashrc..."
-source "$HOME/.bashrc"
+echo "To use immediately, run:"
+echo "  export PATH=\"\$PATH:$INSTALL_DIR\""
 echo ""
-echo "Next steps:"
-echo "  1. Configure your environment variables:"
-echo "     session-manager config"
+echo "Or restart your terminal."
 echo ""
-echo -e "${YELLOW}Note: Your config file will be created at $CONFIG_DIR/config${NC}"
+echo -e "${YELLOW}Quick start:${NC}"
+echo "  sm hosts                    # List available SSH hosts"
+echo "  sm <host>                   # Connect to a host"
+echo "  sm status                   # View all sessions"
+echo "  sm --help                   # Full help"
 echo ""
-echo "You can now use 'session-manager' or the alias 'sm' to get started."
+echo -e "${YELLOW}Your SSH hosts are read from ~/.ssh/config${NC}"

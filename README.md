@@ -1,113 +1,84 @@
-# session-manager
+# Session Manager
 
-A tmux-based session manager for running persistent terminal sessions with different applications.
+Launch and manage persistent terminal sessions on remote machines via SSH.
+
+## Install
+
+```bash
+git clone https://github.com/yourusername/session-manager.git
+cd session-manager
+./install.sh
+```
 
 ## Quick Start
 
 ```bash
-# Clone and install
-git clone https://github.com/yourusername/session-manager.git
-cd session-manager
-./install.sh
+# See your available SSH hosts
+sm hosts
 
-# Start managing sessions (also available via 'sm' alias)
-session-manager
-# or
-sm
+# Connect to a host
+sm dev
+
+# Detach: Ctrl+B, then D
+
+# Reconnect later (same session)
+sm dev
 ```
 
-## Features
+## Common Commands
 
-- **Persistent Sessions**: Run apps in background tmux sessions
-- **Easy Reconnection**: Detach and reattach to any session
-- **App Registry**: Register and manage multiple apps
-- **Interactive TUI**: Interactive menu for easy navigation
-- **CLI Mode**: Full command-line interface for scripting
-- **Environment Variables**: Set app-specific environment variables
-
-## Usage
-
-```bash
-# Interactive mode
-session-manager
-
-# Configure environment variables
-session-manager config
-
-# Quick start a session
-session-manager claude myproject
-session-manager bash scratch
-
-# List sessions
-session-manager list
-
-# Attach to session
-session-manager attach claude-myproject
-
-# Kill session
-session-manager kill claude-myproject
-
-# Create session without attaching (detached mode)
-session-manager claude myproject --detach
-
-# Create session in specific directory
-session-manager bash shell1 --dir ~/projects
-
-# Show session details
-session-manager info claude-myproject
-
-# Restart a session
-session-manager restart claude-myproject
-
-# Show version
-session-manager --version
-```
+| Command | Description |
+|---------|-------------|
+| `sm <host>` | Connect to host |
+| `sm <host> <name>` | Named session on host |
+| `sm status` | Dashboard of all sessions |
+| `sm hosts` | List SSH hosts |
+| `sm sessions <host>` | List sessions on remote host |
+| `sm list` | List local sessions |
+| `sm kill-remote <host> <sess>` | Kill remote session |
 
 ## Configuration
 
-Configure app environment variables:
+Configure what command runs on remote hosts:
 
 ```bash
-# Interactive configuration
-session-manager config
+# Edit ~/.config/session-manager/config
 
-# Or manually create ~/.config/session-manager/config
-export SESSION_MANAGER_ANTHROPIC_AUTH_TOKEN="your-token-here"
-export SESSION_MANAGER_ANTHROPIC_BASE_URL="https://api.anthropic.com"
+# Default shell
+export SESSION_MANAGER_REMOTE_CMD="bash"
+
+# Or run a specific tool:
+export SESSION_MANAGER_REMOTE_CMD="agent-deck"   # AgentDeck
+export SESSION_MANAGER_REMOTE_CMD="htop"         # System monitor
+export SESSION_MANAGER_REMOTE_CMD="nvim"         # Neovim
 ```
 
-Environment variables can also be set in your shell config (~/.bashrc, ~/.zshrc):
-
+Or specify per-session:
 ```bash
-export SESSION_MANAGER_ANTHROPIC_AUTH_TOKEN="your-token-here"
+sm dev --cmd htop
+sm dev --cmd agent-deck
 ```
 
-## Adding New Apps
+## How It Works
 
-Edit the `session-manager` script and add a `register_app` call:
-
-```bash
-register_app "appname" "command to run" \
-    "Description of the app" \
-    "ENV_VAR=\${SESSION_MANAGER_ENV_VAR} DEBUG=true"
+```
+Local Machine                     Remote Server
+┌──────────────┐    SSH    ┌──────────────────────┐
+│ Local tmux   │ ───────── │ Remote tmux          │
+│ session      │           │  └── your command    │
+└──────────────┘           └──────────────────────┘
 ```
 
-Use `\$` to escape environment variables so they expand at runtime, not registration time.
+Sessions run in tmux on the remote, so they **persist even if SSH disconnects**.
 
 ## Requirements
 
-- `tmux` - Install with `sudo apt install tmux` (Debian/Ubuntu) or `brew install tmux` (macOS)
-- `bash` - Modern bash shell (usually pre-installed)
+- `tmux` installed locally and on remote hosts
+- SSH hosts configured in `~/.ssh/config`
 
-## Installation
+## Documentation
 
-The installation script will:
-- Copy the session-manager script to `~/.local/bin/`
-- Add `~/.local/bin` to your PATH in `~/.bashrc` (if not already present)
-- Create a convenient `sm` alias for quick access
-- Copy documentation to `~/.local/bin/session-manager.README.md`
-
-After installation, you can use either `session-manager` or `sm` as a shortcut.
+See [session-manager.README.md](session-manager.README.md) for full documentation.
 
 ## License
 

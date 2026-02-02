@@ -1,9 +1,9 @@
 #!/bin/bash
-# session-manager - Run commands in persistent tmux sessions
+# session-manager - Launch AgentDeck on remote systems via SSH
 
 set -e
 
-VERSION="1.2.0"
+VERSION="2.1.0"
 
 # =============================================================================
 # CONFIGURATION - Load config file if exists
@@ -11,68 +11,461 @@ VERSION="1.2.0"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/session-manager"
 CONFIG_FILE="$CONFIG_DIR/config"
+SSH_CONFIG="${SESSION_MANAGER_SSH_CONFIG:-$HOME/.ssh/config}"
+REMOTE_CMD="${SESSION_MANAGER_REMOTE_CMD:-bash}"
+REMOTE_DIR="${SESSION_MANAGER_REMOTE_DIR:-~}"
 
 if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 fi
 
 # =============================================================================
-# APP REGISTRY - Add new apps here
+# SSH HOST REGISTRY (bash 3.2 compatible - using indexed arrays)
 # =============================================================================
 
-declare -A APP_CMDS
-declare -A APP_DESCS
-declare -A APP_ENVS
-declare -a APP_ORDER
+# Parallel arrays for host data
+SSH_HOST_NAMES=()      # Host alias names
+SSH_HOST_HOSTNAMES=()  # Actual hostnames/IPs
+SSH_HOST_USERS=()      # Users for each host
+SSH_HOST_PORTS=()      # Ports for each host
 
-# Register an app with command, description, and optional environment variables
-register_app() {
-    local app="$1"
-    local cmd="$2"
-    local desc="$3"
-    local envs="${4:-}"
+# =============================================================================
+# SSH CONFIG PARSER
+# =============================================================================
 
-    APP_CMDS[$app]="$cmd"
-    APP_DESCS[$app]="$desc"
-    if [ -n "$envs" ]; then
-        APP_ENVS[$app]="$envs"
+# Get index for a host name (-1 if not found)
+get_host_index() {
+    local host="$1"
+    local i=0
+    for h in "${SSH_HOST_NAMES[@]}"; do
+        if [ "$h" = "$host" ]; then
+            echo "$i"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    echo "-1"
+    return 1
+}
+
+# Check if host exists
+host_exists() {
+    local idx=$(get_host_index "$1")
+    [ "$idx" != "-1" ]
+}
+
+# Get hostname for a host
+get_hostname() {
+    local idx=$(get_host_index "$1")
+    if [ "$idx" != "-1" ]; then
+        echo "${SSH_HOST_HOSTNAMES[$idx]}"
+    else
+        echo "$1"
+    fi
+}
+
+# Get user for a host
+get_user() {
+    local idx=$(get_host_index "$1")
+    if [ "$idx" != "-1" ]; then
+        echo "${SSH_HOST_USERS[$idx]}"
+    fi
+}
+
+# Get port for a host
+get_port() {
+    local idx=$(get_host_index "$1")
+    if [ "$idx" != "-1" ]; then
+        echo "${SSH_HOST_PORTS[$idx]}"
+    fi
+}
+
+# Parse SSH config file and populate host registry
+parse_ssh_config() {
+    local config_file="${1:-$SSH_CONFIG}"
+
+    if [ ! -f "$config_file" ]; then
+        return 1
     fi
 
-    APP_ORDER+=("$app")
+    local current_host=""
+    local current_idx=-1
+    local line
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip comments and empty lines
+        case "$line" in
+            \#*|"") continue ;;
+        esac
+
+        # Trim leading whitespace
+        line="${line#"${line%%[![:space:]]*}"}"
+
+        # Parse Host directive (case insensitive)
+        if echo "$line" | grep -qi "^host[[:space:]]"; then
+            current_host=$(echo "$line" | sed 's/^[Hh]ost[[:space:]]*//')
+            # Skip wildcard entries
+            case "$current_host" in
+                *\**|*\?*) current_host=""; continue ;;
+            esac
+            # Add new host
+            current_idx=${#SSH_HOST_NAMES[@]}
+            SSH_HOST_NAMES+=("$current_host")
+            SSH_HOST_HOSTNAMES+=("$current_host")  # Default to alias
+            SSH_HOST_USERS+=("")
+            SSH_HOST_PORTS+=("")
+            continue
+        fi
+
+        # Skip if no current host
+        [ -z "$current_host" ] && continue
+
+        # Parse HostName
+        if echo "$line" | grep -qi "^hostname[[:space:]]"; then
+            SSH_HOST_HOSTNAMES[$current_idx]=$(echo "$line" | sed 's/^[Hh]ost[Nn]ame[[:space:]]*//')
+            continue
+        fi
+
+        # Parse User
+        if echo "$line" | grep -qi "^user[[:space:]]"; then
+            SSH_HOST_USERS[$current_idx]=$(echo "$line" | sed 's/^[Uu]ser[[:space:]]*//')
+            continue
+        fi
+
+        # Parse Port
+        if echo "$line" | grep -qi "^port[[:space:]]"; then
+            SSH_HOST_PORTS[$current_idx]=$(echo "$line" | sed 's/^[Pp]ort[[:space:]]*//')
+            continue
+        fi
+    done < "$config_file"
+}
+
+# Get formatted host display string
+get_host_display() {
+    local host="$1"
+    local hostname=$(get_hostname "$host")
+    local user=$(get_user "$host")
+    local port=$(get_port "$host")
+
+    local display=""
+    if [ -n "$user" ]; then
+        display="${user}@${hostname}"
+    else
+        display="$hostname"
+    fi
+
+    if [ -n "$port" ] && [ "$port" != "22" ]; then
+        display="${display}:${port}"
+    fi
+
+    echo "$display"
+}
+
+# List all SSH hosts from config
+list_ssh_hosts() {
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════${NC}"
+    echo -e "${CYAN}Available SSH Hosts${NC}"
+    echo -e "${CYAN}════════════════════════════════════════${NC}"
+    echo ""
+
+    if [ ${#SSH_HOST_NAMES[@]} -eq 0 ]; then
+        print_warning "No hosts found in SSH config"
+        print_info "SSH config: $SSH_CONFIG"
+        return 1
+    fi
+
+    local i=1
+    for host in "${SSH_HOST_NAMES[@]}"; do
+        local display=$(get_host_display "$host")
+        printf "  ${CYAN}[%2d]${NC} %-20s %s\n" "$i" "$host" "($display)"
+        i=$((i + 1))
+    done
+    echo ""
+}
+
+# Test SSH connection to a host
+test_ssh_connection() {
+    local host="$1"
+    print_info "Testing connection to $host..."
+
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" "echo 'Connection successful'" 2>/dev/null; then
+        print_success "Connection to $host successful"
+        return 0
+    else
+        print_error "Failed to connect to $host"
+        return 1
+    fi
+}
+
+# Check if agent-deck is installed on remote
+check_remote_cmd() {
+    local host="$1"
+    local cmd="${2:-$REMOTE_CMD}"
+
+    # Use login shell to ensure PATH includes user directories like ~/.local/bin
+    if ssh -o ConnectTimeout=5 "$host" "bash -l -c 'command -v $cmd'" >/dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # =============================================================================
-# BUILT-IN APPS
+# REMOTE SESSION MANAGEMENT
 # =============================================================================
 
-# Interactive bash shell
-register_app "bash" "bash --login" \
-    "Interactive bash shell" \
-    ""
+# List tmux sessions on a remote host
+list_remote_sessions() {
+    local host="$1"
 
-# OpenCode editor (terminal TUI)
-register_app "opencode" "opencode" \
-    "OpenCode editor TUI" \
-    ""
+    if [ -z "$host" ]; then
+        print_error "Please specify a host"
+        return 1
+    fi
 
-# Claude Code CLI - configure via env vars or config file
-register_app "claude" "claude --dangerously-skip-permissions" \
-    "Claude Code CLI" \
-    "COLORTERM=truecolor ANTHROPIC_BASE_URL=\${SESSION_MANAGER_ANTHROPIC_BASE_URL:-https://api.anthropic.com} API_TIMEOUT_MS=\${SESSION_MANAGER_API_TIMEOUT_MS:-3000000} ANTHROPIC_DEFAULT_HAIKU_MODEL=\${SESSION_MANAGER_HAIKU_MODEL:-claude-3-5-haiku} ANTHROPIC_DEFAULT_SONNET_MODEL=\${SESSION_MANAGER_SONNET_MODEL:-claude-3-5-sonnet} ANTHROPIC_DEFAULT_OPUS_MODEL=\${SESSION_MANAGER_OPUS_MODEL:-claude-3-opus} ANTHROPIC_AUTH_TOKEN=\${SESSION_MANAGER_ANTHROPIC_AUTH_TOKEN}"
+    print_info "Fetching tmux sessions on $host..."
+
+    local sessions
+    sessions=$(ssh -o ConnectTimeout=10 "$host" "tmux list-sessions 2>/dev/null" 2>/dev/null) || true
+
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════${NC}"
+    echo -e "${CYAN}Remote Sessions on $host${NC}"
+    echo -e "${CYAN}════════════════════════════════════════${NC}"
+    echo ""
+
+    if [ -z "$sessions" ]; then
+        echo "  No tmux sessions running on $host"
+    else
+        echo "$sessions" | while read -r line; do
+            echo "  $line"
+        done
+    fi
+    echo ""
+}
+
+# Kill a tmux session on a remote host
+kill_remote_session() {
+    local host="$1"
+    local session="$2"
+
+    if [ -z "$host" ] || [ -z "$session" ]; then
+        print_error "Usage: session-manager kill-remote <host> <session-name>"
+        return 1
+    fi
+
+    print_info "Killing remote session '$session' on $host..."
+
+    if ssh -o ConnectTimeout=10 "$host" "tmux kill-session -t '$session'" 2>/dev/null; then
+        print_success "Killed remote session '$session' on $host"
+
+        # Also kill local session if it exists
+        local local_session="remote-$session"
+        if tmux has-session -t "$local_session" 2>/dev/null; then
+            tmux kill-session -t "$local_session" 2>/dev/null
+            print_success "Killed local session '$local_session'"
+        fi
+    else
+        print_error "Failed to kill session '$session' on $host"
+        return 1
+    fi
+}
+
+# Show status of all remote sessions across all hosts
+show_status() {
+    echo ""
+    echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║   Session Manager - Status Dashboard                        ║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    # Show local sessions
+    echo -e "${YELLOW}Local Sessions:${NC}"
+    local local_sessions
+    local_sessions=$(tmux list-sessions 2>/dev/null) || true
+
+    if [ -z "$local_sessions" ]; then
+        echo "  No local tmux sessions"
+    else
+        echo "$local_sessions" | while read -r line; do
+            local sess_name=$(echo "$line" | cut -d: -f1)
+            case "$sess_name" in
+                remote-*)
+                    echo "  ${GREEN}●${NC} $line"
+                    ;;
+                *)
+                    echo "  ${BLUE}●${NC} $line"
+                    ;;
+            esac
+        done
+    fi
+    echo ""
+
+    # Check remote hosts with active local sessions
+    echo -e "${YELLOW}Remote Hosts (checking active connections):${NC}"
+
+    local checked_hosts=""
+    for sess in $(tmux list-sessions -F "#{session_name}" 2>/dev/null); do
+        case "$sess" in
+            remote-*)
+                local remote_part="${sess#remote-}"
+                # Find the host
+                for h in "${SSH_HOST_NAMES[@]}"; do
+                    if [ "$remote_part" = "$h" ] || echo "$remote_part" | grep -q "^$h-"; then
+                        # Check if we already checked this host
+                        case "$checked_hosts" in
+                            *"|$h|"*) continue ;;
+                        esac
+                        checked_hosts="${checked_hosts}|$h|"
+
+                        # Get remote session count
+                        local count
+                        count=$(ssh -o ConnectTimeout=3 -o BatchMode=yes "$h" "tmux list-sessions 2>/dev/null | wc -l" 2>/dev/null) || count="?"
+                        echo "  ${GREEN}●${NC} $h ($(get_host_display "$h")) - $count remote session(s)"
+                        break
+                    fi
+                done
+                ;;
+        esac
+    done
+
+    if [ -z "$checked_hosts" ]; then
+        echo "  No active remote connections"
+    fi
+    echo ""
+
+    echo -e "${YELLOW}Quick Commands:${NC}"
+    echo "  sm <host>                    Connect to host"
+    echo "  sm sessions <host>           List sessions on host"
+    echo "  sm kill-remote <host> <sess> Kill remote session"
+    echo ""
+}
+
+# Connect to host - show picker if multiple sessions exist
+smart_connect() {
+    local host="$1"
+    local session_name="$2"
+    local remote_dir="$3"
+    local cmd="$4"
+    local detach="$5"
+
+    # If session name provided, connect directly
+    if [ -n "$session_name" ]; then
+        local full_name="remote-$host-$session_name"
+        if tmux has-session -t "$full_name" 2>/dev/null; then
+            print_info "Attaching to existing session '$full_name'..."
+            attach_session "$full_name"
+        else
+            create_remote_session "$host" "$full_name" "$remote_dir" "$cmd"
+            if [ "$detach" != "true" ]; then
+                attach_session "$full_name"
+            fi
+        fi
+        return 0
+    fi
+
+    # Check for existing local session for this host
+    local default_session="remote-$host"
+    if tmux has-session -t "$default_session" 2>/dev/null; then
+        print_info "Attaching to existing session '$default_session'..."
+        attach_session "$default_session"
+        return 0
+    fi
+
+    # Check for other sessions for this host
+    local matching_sessions=()
+    for sess in $(tmux list-sessions -F "#{session_name}" 2>/dev/null); do
+        case "$sess" in
+            remote-$host|remote-$host-*)
+                matching_sessions+=("$sess")
+                ;;
+        esac
+    done
+
+    if [ ${#matching_sessions[@]} -gt 1 ]; then
+        # Multiple sessions - show picker
+        echo ""
+        print_info "Multiple sessions found for $host:"
+        echo ""
+        local i=1
+        for sess in "${matching_sessions[@]}"; do
+            echo "  [$i] $sess"
+            i=$((i + 1))
+        done
+        echo "  [n] Create new session"
+        echo ""
+
+        read -p "Select session: " choice
+
+        if [ "$choice" = "n" ] || [ "$choice" = "N" ]; then
+            read -p "Session name: " new_name
+            create_remote_session "$host" "remote-$host-$new_name" "$remote_dir" "$cmd"
+            if [ "$detach" != "true" ]; then
+                attach_session "remote-$host-$new_name"
+            fi
+        elif echo "$choice" | grep -q "^[0-9]*$" && [ "$choice" -ge 1 ] && [ "$choice" -le "${#matching_sessions[@]}" ]; then
+            attach_session "${matching_sessions[$((choice-1))]}"
+        else
+            print_error "Invalid selection"
+            return 1
+        fi
+    elif [ ${#matching_sessions[@]} -eq 1 ]; then
+        # One session - attach to it
+        print_info "Attaching to '${matching_sessions[0]}'..."
+        attach_session "${matching_sessions[0]}"
+    else
+        # No sessions - create new
+        create_remote_session "$host" "$default_session" "$remote_dir" "$cmd"
+        if [ "$detach" != "true" ]; then
+            attach_session "$default_session"
+        fi
+    fi
+}
 
 # =============================================================================
-# ADD YOUR CUSTOM APPS BELOW
+# LOCAL APP REGISTRY (commented out - using remote SSH hosts instead)
 # =============================================================================
 
-# Examples (uncomment and modify as needed):
+# declare -A APP_CMDS
+# declare -A APP_DESCS
+# declare -A APP_ENVS
+# declare -a APP_ORDER
+
+# Register an app with command, description, and optional environment variables
+# register_app() {
+#     local app="$1"
+#     local cmd="$2"
+#     local desc="$3"
+#     local envs="${4:-}"
 #
-# register_app "python" "python3" \
-#     "Python REPL" \
+#     APP_CMDS[$app]="$cmd"
+#     APP_DESCS[$app]="$desc"
+#     if [ -n "$envs" ]; then
+#         APP_ENVS[$app]="$envs"
+#     fi
+#
+#     APP_ORDER+=("$app")
+# }
+
+# =============================================================================
+# BUILT-IN APPS (commented out - using AgentDeck on remote hosts)
+# =============================================================================
+
+# # Interactive bash shell
+# register_app "bash" "bash --login" \
+#     "Interactive bash shell" \
 #     ""
 #
-# register_app "node" "node" \
-#     "Node.js REPL" \
+# # OpenCode editor (terminal TUI)
+# register_app "opencode" "opencode" \
+#     "OpenCode editor TUI" \
 #     ""
+#
+# # Claude Code CLI - configure via env vars or config file
+# register_app "claude" "claude --dangerously-skip-permissions" \
+#     "Claude Code CLI" \
+#     "COLORTERM=truecolor ANTHROPIC_BASE_URL=\${SESSION_MANAGER_ANTHROPIC_BASE_URL:-https://api.anthropic.com} API_TIMEOUT_MS=\${SESSION_MANAGER_API_TIMEOUT_MS:-3000000} ANTHROPIC_DEFAULT_HAIKU_MODEL=\${SESSION_MANAGER_HAIKU_MODEL:-claude-3-5-haiku} ANTHROPIC_DEFAULT_SONNET_MODEL=\${SESSION_MANAGER_SONNET_MODEL:-claude-3-5-sonnet} ANTHROPIC_DEFAULT_OPUS_MODEL=\${SESSION_MANAGER_OPUS_MODEL:-claude-3-opus} ANTHROPIC_AUTH_TOKEN=\${SESSION_MANAGER_ANTHROPIC_AUTH_TOKEN}"
 
 # =============================================================================
 # CORE FUNCTIONALITY
@@ -115,87 +508,129 @@ get_session_count() {
     list_sessions | wc -l
 }
 
-# List available apps
-list_apps() {
-    echo ""
-    echo -e "${CYAN}Available Apps:${NC}"
-    echo ""
+# =============================================================================
+# REMOTE SESSION MANAGEMENT
+# =============================================================================
 
-    local max_len=0
-    for app in "${APP_ORDER[@]}"; do
-        [ ${#app} -gt $max_len ] && max_len=${#app}
-    done
+# Create remote session - SSH to host and run agent-deck in remote tmux
+create_remote_session() {
+    local host="$1"
+    local session_name="${2:-remote-$host}"
+    local remote_dir="${3:-$REMOTE_DIR}"
+    local cmd="${4:-$REMOTE_CMD}"
 
-    for app in "${APP_ORDER[@]}"; do
-        printf "  ${CYAN}%-${max_len}s${NC}  %s\n" "$app" "${APP_DESCS[$app]}"
-    done
-    echo ""
-}
-
-# Get app command
-get_app_cmd() {
-    local app="$1"
-    if [ -z "${APP_CMDS[$app]}" ]; then
+    # Validate host exists in config
+    if ! host_exists "$host"; then
+        print_error "Unknown host: $host"
+        print_info "Use 'session-manager hosts' to see available hosts."
         return 1
     fi
-    echo "${APP_CMDS[$app]}"
-}
 
-# Get app description
-get_app_desc() {
-    local app="$1"
-    echo "${APP_DESCS[$app]:-}"
-}
+    # Remote tmux session name (strip 'remote-' prefix for cleaner remote name)
+    local remote_session="${session_name#remote-}"
 
-# Get app environment variables
-get_app_env() {
-    local app="$1"
-    echo "${APP_ENVS[$app]:-}"
-}
+    print_info "Creating remote session '$session_name'"
+    print_info "Host: $host ($(get_host_display "$host"))"
+    print_info "Remote tmux session: $remote_session"
+    print_info "Command: $cmd"
 
-# Create new session for an app
-create_session() {
-    local app="$1"
-    local session_name="$2"
-    local work_dir="${3:-$PWD}"
-    local cmd
-    local envs
-
-    cmd=$(get_app_cmd "$app") || {
-        print_error "Unknown app: $app"
-        print_info "Use 'session-manager list-apps' to see available apps."
-        return 1
-    }
-
-    envs=$(get_app_env "$app")
-
-    print_info "Creating session '$session_name' in $work_dir"
-    print_info "App: $app - ${APP_DESCS[$app]}"
-
-    # Check if session already exists
+    # Check if local session already exists
     if tmux has-session -t "$session_name" 2>/dev/null; then
         print_warning "Session '$session_name' already exists, attaching..."
         attach_session "$session_name"
         return 0
     fi
 
-    # Check if working directory exists
-    if [ ! -d "$work_dir" ]; then
-        print_error "Directory does not exist: $work_dir"
+    # Build SSH command that creates/attaches to remote tmux session
+    # -A: attach if session exists, create if not
+    # Use login shell (-l) to ensure PATH includes ~/.local/bin etc.
+    # This ensures the remote session persists even if SSH disconnects
+    #
+    # DETACH: Since you're in nested tmux (local -> remote):
+    #   Ctrl+B D = detach from LOCAL tmux (recommended - keeps SSH alive)
+    #   To detach from REMOTE only: Ctrl+B : detach (tmux command mode)
+    local remote_tmux_cmd="cd $remote_dir 2>/dev/null; tmux new-session -A -s '$remote_session' 'bash -l -c \"$cmd\"'"
+    local ssh_cmd="ssh -t $host \"$remote_tmux_cmd\""
+
+    # Create local tmux session with SSH command
+    tmux new-session -d -s "$session_name" bash -c "$ssh_cmd"
+    print_success "Created remote session '$session_name'"
+    print_info "Remote tmux session '$remote_session' on $host"
+    print_info "Detach: Ctrl+B, D"
+}
+
+# Create remote session interactively
+create_remote_session_interactive() {
+    echo ""
+    print_info "Create Remote Session"
+    echo ""
+
+    if [ ${#SSH_HOST_NAMES[@]} -eq 0 ]; then
+        print_warning "No SSH hosts configured"
+        print_info "Add hosts to: $SSH_CONFIG"
         return 1
     fi
 
-    # Build the command with environment variables
-    local full_cmd=""
-    if [ -n "$envs" ]; then
-        full_cmd="export $envs && exec $cmd"
-    else
-        full_cmd="exec $cmd"
+    # Show hosts
+    echo "Available hosts:"
+    local i=1
+    for host in "${SSH_HOST_NAMES[@]}"; do
+        local display=$(get_host_display "$host")
+        printf "  [%2d] %-20s (%s)\n" "$i" "$host" "$display"
+        i=$((i + 1))
+    done
+    echo ""
+
+    read -p "Select host: " host_choice
+
+    if ! echo "$host_choice" | grep -q "^[0-9]*$" || [ "$host_choice" -lt 1 ] || [ "$host_choice" -gt "${#SSH_HOST_NAMES[@]}" ]; then
+        print_error "Invalid selection"
+        return 1
     fi
 
+    local host="${SSH_HOST_NAMES[$((host_choice-1))]}"
+
+    # Get session name
+    local default_name="remote-$host"
+    read -p "Session name [$default_name]: " session_name
+    session_name="${session_name:-$default_name}"
+
+    # Get remote directory
+    read -p "Remote directory [$REMOTE_DIR]: " remote_dir
+    remote_dir="${remote_dir:-$REMOTE_DIR}"
+
+    # Test connection option
+    read -p "Test connection first? [y/N]: " test_conn
+    case "$test_conn" in
+        [Yy]*)
+            if ! test_ssh_connection "$host"; then
+                return 1
+            fi
+
+            # Check if agent-deck is installed
+            print_info "Checking if $REMOTE_CMD is installed on $host..."
+            if check_remote_cmd "$host"; then
+                print_success "$REMOTE_CMD found on $host"
+            else
+                print_warning "$REMOTE_CMD not found on $host"
+                read -p "Continue anyway? [y/N]: " continue_anyway
+                case "$continue_anyway" in
+                    [Yy]*) ;;
+                    *) return 1 ;;
+                esac
+            fi
+            ;;
+    esac
+
     # Create session
-    tmux new-session -d -s "$session_name" -c "$work_dir" bash -c "$full_cmd"
-    print_success "Created session '$session_name'"
+    create_remote_session "$host" "$session_name" "$remote_dir"
+
+    # Ask to attach
+    read -p "Attach to session now? [Y/n]: " attach
+    case "$attach" in
+        [Nn]*) ;;
+        *) attach_session "$session_name" ;;
+    esac
 }
 
 # Attach to session
@@ -227,17 +662,17 @@ show_sessions() {
     local i=1
     for sess in "${sessions[@]}"; do
         echo "  [$i] $sess"
-        ((i++))
+        i=$((i + 1))
     done
     echo ""
 
     read -p "Select session number (or 'q' to cancel): " choice
 
-    if [[ "$choice" == "q" ]]; then
-        return 1
-    fi
+    case "$choice" in
+        q|Q) return 1 ;;
+    esac
 
-    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#sessions[@]}" ]; then
+    if echo "$choice" | grep -q "^[0-9]*$" && [ "$choice" -ge 1 ] && [ "$choice" -le "${#sessions[@]}" ]; then
         local selected="${sessions[$((choice-1))]}"
         attach_session "$selected"
     else
@@ -253,15 +688,24 @@ show_sessions() {
 show_main_menu() {
     clear
     echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║   Session Manager                      ║${NC}"
+    echo -e "${CYAN}║         Session Manager                ║${NC}"
     echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
     echo ""
 
-    # Show available apps
-    echo "Available apps:"
-    for app in "${APP_ORDER[@]}"; do
-        echo "  ${CYAN}$app${NC} - ${APP_DESCS[$app]}"
-    done
+    # Show available SSH hosts
+    echo "SSH Hosts: ${#SSH_HOST_NAMES[@]} configured"
+    if [ ${#SSH_HOST_NAMES[@]} -gt 0 ]; then
+        local max_show=5
+        local shown=0
+        for host in "${SSH_HOST_NAMES[@]}"; do
+            if [ $shown -ge $max_show ]; then
+                echo "  ${CYAN}...${NC} and $((${#SSH_HOST_NAMES[@]} - max_show)) more"
+                break
+            fi
+            echo "  ${CYAN}$host${NC} - $(get_host_display "$host")"
+            shown=$((shown + 1))
+        done
+    fi
     echo ""
 
     # Show running sessions
@@ -270,62 +714,17 @@ show_main_menu() {
     echo ""
 
     echo "Options:"
-    echo "  [1] Create new session"
+    echo "  [1] Connect to remote host"
     echo "  [2] Attach to session"
-    echo "  [3] List sessions"
-    echo "  [4] Kill session"
-    echo "  [5] List apps"
-    echo "  [6] Configure"
-    echo "  [7] Session info"
-    echo "  [8] Restart session"
+    echo "  [3] List local sessions"
+    echo "  [4] Kill local session"
+    echo "  [5] List SSH hosts"
+    echo "  [6] List remote sessions on host"
+    echo "  [7] Status dashboard"
+    echo "  [8] Test SSH connection"
+    echo "  [9] Configure"
     echo "  [q] Quit"
     echo ""
-}
-
-# Create session interactively
-create_session_interactive() {
-    echo ""
-    print_info "Create new session"
-    echo ""
-
-    # Select app
-    echo "Available apps:"
-    local apps=("${APP_ORDER[@]}")
-    local i=1
-    for app in "${apps[@]}"; do
-        echo "  [$i] $app - ${APP_DESCS[$app]}"
-        ((i++))
-    done
-    echo ""
-
-    read -p "Select app: " app_choice
-
-    if [[ ! "$app_choice" =~ ^[0-9]+$ ]] || [ "$app_choice" -lt 1 ] || [ "$app_choice" -gt "${#apps[@]}" ]; then
-        print_error "Invalid selection"
-        return 1
-    fi
-
-    local app="${apps[$((app_choice-1))]}"
-
-    # Get session name
-    local default_name="$app-$(date +%H%M)"
-    read -p "Session name [$default_name]: " session_name
-    session_name="${session_name:-$default_name}"
-
-    # Get working directory
-    local work_dir="$PWD"
-    read -p "Working directory [$work_dir]: " dir_input
-    work_dir="${dir_input:-$work_dir}"
-    work_dir="${work_dir/#\~/$HOME}"
-
-    # Create session
-    create_session "$app" "$session_name" "$work_dir"
-
-    # Ask to attach
-    read -p "Attach to session now? [Y/n]: " attach
-    if [[ ! "$attach" =~ ^[Nn]$ ]]; then
-        attach_session "$session_name"
-    fi
 }
 
 # Kill session interactively
@@ -345,22 +744,22 @@ kill_session_interactive() {
     local i=1
     for sess in "${sessions[@]}"; do
         echo "  [$i] $sess"
-        ((i++))
+        i=$((i + 1))
     done
     echo ""
 
     read -p "Select session to kill (or 'q' to cancel): " choice
 
-    if [[ "$choice" == "q" ]]; then
-        return
-    fi
+    case "$choice" in
+        q|Q) return ;;
+    esac
 
-    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#sessions[@]}" ]; then
+    if echo "$choice" | grep -q "^[0-9]*$" && [ "$choice" -ge 1 ] && [ "$choice" -le "${#sessions[@]}" ]; then
         local selected="${sessions[$((choice-1))]}"
         read -p "Confirm kill session '$selected'? [y/N]: " confirm
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            kill_session "$selected"
-        fi
+        case "$confirm" in
+            [Yy]*) kill_session "$selected" ;;
+        esac
     else
         print_error "Invalid selection"
     fi
@@ -404,15 +803,28 @@ show_session_info() {
         echo "  Status: $session_info"
     fi
 
-    # Get working directory
-    local work_dir=$(tmux display-message -p -t "$session_name" "#{pane_current_path}")
-    echo "  Working Directory: $work_dir"
-
-    # Get running command
-    local cmd=$(tmux send-keys -t "$session_name" 'echo $$' C-m 2>/dev/null && sleep 0.1 && tmux capture-pane -p -t "$session_name" | tail -1)
-    echo ""
+    # Check if this is a remote session
+    case "$session_name" in
+        remote-*)
+            local remote_part="${session_name#remote-}"
+            # Try to find the host in our registry
+            local found_host=""
+            for h in "${SSH_HOST_NAMES[@]}"; do
+                if [ "$remote_part" = "$h" ] || echo "$remote_part" | grep -q "^$h-"; then
+                    found_host="$h"
+                    break
+                fi
+            done
+            if [ -n "$found_host" ]; then
+                echo "  Type: Remote (SSH + tmux)"
+                echo "  Host: $found_host ($(get_host_display "$found_host"))"
+                echo "  Remote tmux session: $remote_part"
+            fi
+            ;;
+    esac
 
     # List windows
+    echo ""
     echo "  Windows:"
     tmux list-windows -t "$session_name" 2>/dev/null | while read -r window; do
         echo "    $window"
@@ -420,7 +832,7 @@ show_session_info() {
     echo ""
 }
 
-# Restart session
+# Restart remote session
 restart_session() {
     local session_name="$1"
 
@@ -431,25 +843,74 @@ restart_session() {
 
     print_info "Restarting session '$session_name'"
 
-    # Extract app name from session name (remove suffix after dash)
-    local app=$(echo "$session_name" | sed 's/-.*//')
+    # Check if this is a remote session
+    case "$session_name" in
+        remote-*)
+            local host="${session_name#remote-}"
+            # Handle session names like remote-hostname-suffix
+            # Try to find the host in our registry
+            local found_host=""
+            for h in "${SSH_HOST_NAMES[@]}"; do
+                if [ "$session_name" = "remote-$h" ] || echo "$session_name" | grep -q "^remote-$h-"; then
+                    found_host="$h"
+                    break
+                fi
+            done
 
-    # Get current working directory
-    local work_dir=$(tmux display-message -p -t "$session_name" "#{pane_current_path}")
+            if [ -n "$found_host" ]; then
+                kill_session "$session_name"
+                create_remote_session "$found_host" "$session_name"
+                print_success "Restarted remote session '$session_name'"
+                return 0
+            fi
+            ;;
+    esac
 
-    # Kill and recreate
-    kill_session "$session_name"
+    print_warning "Cannot restart session - unknown type"
+    print_info "Kill and recreate the session manually"
+    return 1
+}
 
-    # Check if app still exists
-    if [ -z "${APP_CMDS[$app]}" ]; then
-        print_warning "App '$app' no longer exists in registry"
+# Test SSH connection interactively
+test_ssh_interactive() {
+    echo ""
+    print_info "Test SSH Connection"
+    echo ""
+
+    if [ ${#SSH_HOST_NAMES[@]} -eq 0 ]; then
+        print_warning "No SSH hosts configured"
         return 1
     fi
 
-    # Create new session
-    create_session "$app" "$session_name" "$work_dir"
+    echo "Available hosts:"
+    local i=1
+    for host in "${SSH_HOST_NAMES[@]}"; do
+        local display=$(get_host_display "$host")
+        printf "  [%2d] %-20s (%s)\n" "$i" "$host" "$display"
+        i=$((i + 1))
+    done
+    echo ""
 
-    print_success "Restarted session '$session_name'"
+    read -p "Select host to test: " choice
+
+    if ! echo "$choice" | grep -q "^[0-9]*$" || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#SSH_HOST_NAMES[@]}" ]; then
+        print_error "Invalid selection"
+        return 1
+    fi
+
+    local host="${SSH_HOST_NAMES[$((choice-1))]}"
+
+    test_ssh_connection "$host"
+
+    # Also check for agent-deck
+    echo ""
+    print_info "Checking for $REMOTE_CMD on $host..."
+    if check_remote_cmd "$host"; then
+        print_success "$REMOTE_CMD is installed on $host"
+    else
+        print_warning "$REMOTE_CMD not found on $host"
+        print_info "You may need to install AgentDeck on the remote system"
+    fi
 }
 
 # =============================================================================
@@ -458,48 +919,85 @@ restart_session() {
 
 show_help() {
     cat << 'EOF'
-Usage: session-manager <app> [name]           Create or attach to <app> session
-   or: session-manager <app> [name] [options]  Create session with options
-   or: session-manager attach <name>          Attach to specific session
-   or: session-manager list                   List all sessions
-   or: session-manager list-apps              List available apps
-   or: session-manager kill <name>            Kill a session
-   or: session-manager info <name>            Show session details
-   or: session-manager restart <name>         Restart a session
-   or: session-manager config                 Configure environment variables
-   or: session-manager                        Interactive menu
-   or: session-manager --version              Show version
+Usage: sm <host> [name]                   Start session on remote host
+   or: sm hosts                           List available SSH hosts
+   or: sm status                          Dashboard of all sessions
+   or: sm sessions <host>                 List tmux sessions on remote host
+   or: sm list                            List local tmux sessions
+   or: sm attach <name>                   Attach to local session
+   or: sm kill <name>                     Kill local session
+   or: sm kill-remote <host> <session>    Kill remote tmux session
+   or: sm info <name>                     Show session details
+   or: sm restart <name>                  Restart a session
+   or: sm test <host>                     Test SSH connection
+   or: sm config                          Configure settings
+   or: sm                                 Interactive menu
+   or: sm --version                       Show version
 
 Options:
   --detach, -d                        Create session without attaching
-  --dir <path>, -D <path>             Specify working directory
+  --dir <path>, -D <path>             Specify remote working directory
+  --cmd <command>                     Override default command (default: bash)
 
-Session naming pattern: <app>-<name>
-Example: session-manager claude myproject  →  creates session "claude-myproject"
+Session naming pattern: remote-<host>[-name]
+Example: sm myserver work  →  creates session "remote-myserver-work"
 
 Examples:
-  session-manager claude myproject               Create/attach to claude session
-  session-manager claude myproject --detach      Create session without attaching
-  session-manager bash scratch -D ~/projects     Create bash session in specific directory
-  session-manager list                           List all sessions
-  session-manager attach claude-myproject        Attach to specific session
-  session-manager info claude-myproject          Show session details
-  session-manager restart claude-myproject       Restart a session
-  session-manager kill claude-myproject          Kill a session
-  session-manager list-apps                      List available apps
-  session-manager config                         Configure app environment variables
-  session-manager --version                      Show version
+  sm dev                                   Connect to dev (creates or attaches)
+  sm dev project                           Named session on dev
+  sm dev --detach                          Create without attaching
+  sm dev -D ~/code                         Start in specific remote directory
+  sm dev --cmd htop                        Run htop instead of default
 
-Adding new apps:
-  Edit the session-manager script and add a register_app call:
+  sm status                                Show all sessions dashboard
+  sm hosts                                 List available SSH hosts
+  sm sessions dev                          List tmux sessions on dev
+  sm list                                  List local sessions
 
-    register_app "myapp" "myapp --daemon" \
-        "My custom application" \
-        "API_KEY=\${SESSION_MANAGER_API_KEY} DEBUG=true"
+  sm attach remote-dev                     Attach to local session
+  sm kill remote-dev                       Kill local session
+  sm kill-remote dev mysession             Kill remote tmux session
+
+  sm test dev                              Test SSH connection
+  sm config                                Configure settings
+
+Detaching:
+  Ctrl+B, D                               Detach from session (keeps it running)
+
+SSH Configuration:
+  Hosts are read from your SSH config file (~/.ssh/config).
+  Add hosts there to make them available in session-manager.
+
+  Example ~/.ssh/config:
+    Host myserver
+        Hostname 192.168.1.100
+        User myuser
+
+    Host devbox
+        Hostname dev.example.com
+        User developer
+        Port 2222
+
+How it works:
+  When you connect to a remote host, session-manager creates:
+    1. A local tmux session (for managing the SSH connection)
+    2. A remote tmux session (for persisting AgentDeck)
+
+  This means AgentDeck keeps running on the remote even if:
+    - Your SSH connection drops
+    - You detach from the local session
+    - You close your terminal
+
+  Reconnecting will reattach to the existing remote AgentDeck session.
 
 Configuration:
-  Run 'session-manager config' to set environment variables.
+  Run 'session-manager config' to set options.
   Config file location: ~/.config/session-manager/config
+
+Environment Variables:
+  SESSION_MANAGER_SSH_CONFIG     SSH config file (default: ~/.ssh/config)
+  SESSION_MANAGER_REMOTE_CMD     Command to run on remote (default: bash)
+  SESSION_MANAGER_REMOTE_DIR     Default remote directory (default: ~)
 
 EOF
 }
@@ -520,41 +1018,36 @@ configure() {
         cat "$config_file"
         echo ""
         read -p "Overwrite existing config? [y/N]: " overwrite
-        if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
-            print_info "Keeping existing configuration."
-            return 0
-        fi
+        case "$overwrite" in
+            [Yy]*) ;;
+            *) print_info "Keeping existing configuration."; return 0 ;;
+        esac
     fi
 
     echo ""
-    echo "Configure Claude Code CLI (optional):"
-    echo "Leave blank to skip."
+    echo "Configure Remote AgentDeck Settings:"
+    echo "Leave blank to use defaults."
     echo ""
 
-    read -p "ANTHROPIC_AUTH_TOKEN: " auth_token
-    if [ -n "$auth_token" ]; then
-        echo "export SESSION_MANAGER_ANTHROPIC_AUTH_TOKEN='$auth_token'" > "$config_file"
+    # Start fresh config file
+    echo "# Session Manager Configuration" > "$config_file"
+    echo "# Generated on $(date)" >> "$config_file"
+    echo "" >> "$config_file"
+
+    read -p "SSH config file [$HOME/.ssh/config]: " ssh_config
+    if [ -n "$ssh_config" ]; then
+        echo "export SESSION_MANAGER_SSH_CONFIG='$ssh_config'" >> "$config_file"
     fi
 
-    read -p "ANTHROPIC_BASE_URL [https://api.anthropic.com]: " base_url
-    base_url="${base_url:-https://api.anthropic.com}"
-    echo "export SESSION_MANAGER_ANTHROPIC_BASE_URL='$base_url'" >> "$config_file"
+    read -p "Remote command [bash]: " remote_cmd
+    if [ -n "$remote_cmd" ]; then
+        echo "export SESSION_MANAGER_REMOTE_CMD='$remote_cmd'" >> "$config_file"
+    fi
 
-    read -p "API_TIMEOUT_MS [3000000]: " timeout
-    timeout="${timeout:-3000000}"
-    echo "export SESSION_MANAGER_API_TIMEOUT_MS='$timeout'" >> "$config_file"
-
-    read -p "HAIKU_MODEL [claude-3-5-haiku]: " haiku_model
-    haiku_model="${haiku_model:-claude-3-5-haiku}"
-    echo "export SESSION_MANAGER_HAIKU_MODEL='$haiku_model'" >> "$config_file"
-
-    read -p "SONNET_MODEL [claude-3-5-sonnet]: " sonnet_model
-    sonnet_model="${sonnet_model:-claude-3-5-sonnet}"
-    echo "export SESSION_MANAGER_SONNET_MODEL='$sonnet_model'" >> "$config_file"
-
-    read -p "OPUS_MODEL [claude-3-opus]: " opus_model
-    opus_model="${opus_model:-claude-3-opus}"
-    echo "export SESSION_MANAGER_OPUS_MODEL='$opus_model'" >> "$config_file"
+    read -p "Default remote directory [~]: " remote_dir
+    if [ -n "$remote_dir" ]; then
+        echo "export SESSION_MANAGER_REMOTE_DIR='$remote_dir'" >> "$config_file"
+    fi
 
     chmod 600 "$config_file"
     print_success "Configuration saved to $config_file"
@@ -564,9 +1057,13 @@ configure() {
 main() {
     check_tmux
 
+    # Parse SSH config at startup
+    parse_ssh_config
+
     # Handle global flags first
     local detach=false
-    local work_dir="$PWD"
+    local remote_dir="$REMOTE_DIR"
+    local custom_cmd=""
 
     for arg in "$@"; do
         case "$arg" in
@@ -585,7 +1082,7 @@ main() {
 
             case "$choice" in
                 1)
-                    create_session_interactive
+                    create_remote_session_interactive
                     ;;
                 2)
                     show_sessions
@@ -599,70 +1096,48 @@ main() {
                     read -p "Press Enter to continue..."
                     ;;
                 5)
-                    list_apps
+                    list_ssh_hosts
                     read -p "Press Enter to continue..."
                     ;;
                 6)
-                    configure
+                    # List remote sessions on a host
+                    echo ""
+                    print_info "List Remote Sessions"
+                    echo ""
+
+                    if [ ${#SSH_HOST_NAMES[@]} -eq 0 ]; then
+                        print_warning "No SSH hosts configured"
+                        read -p "Press Enter to continue..."
+                        continue
+                    fi
+
+                    echo "Select host:"
+                    local i=1
+                    for host in "${SSH_HOST_NAMES[@]}"; do
+                        printf "  [%2d] %s\n" "$i" "$host"
+                        i=$((i + 1))
+                    done
+                    echo ""
+
+                    read -p "Host number: " host_choice
+
+                    if echo "$host_choice" | grep -q "^[0-9]*$" && [ "$host_choice" -ge 1 ] && [ "$host_choice" -le "${#SSH_HOST_NAMES[@]}" ]; then
+                        local selected_host="${SSH_HOST_NAMES[$((host_choice-1))]}"
+                        list_remote_sessions "$selected_host"
+                    fi
                     read -p "Press Enter to continue..."
                     ;;
                 7)
-                    echo ""
-                    print_info "Session Info"
-                    echo ""
-
-                    local sessions=($(tmux list-sessions 2>/dev/null | sed 's/:.*$//'))
-
-                    if [ ${#sessions[@]} -eq 0 ]; then
-                        print_warning "No running sessions found"
-                        read -p "Press Enter to continue..."
-                        continue
-                    fi
-
-                    echo "Running sessions:"
-                    local i=1
-                    for sess in "${sessions[@]}"; do
-                        echo "  [$i] $sess"
-                        ((i++))
-                    done
-                    echo ""
-
-                    read -p "Select session: " info_choice
-
-                    if [[ "$info_choice" =~ ^[0-9]+$ ]] && [ "$info_choice" -ge 1 ] && [ "$info_choice" -le "${#sessions[@]}" ]; then
-                        local selected="${sessions[$((info_choice-1))]}"
-                        show_session_info "$selected"
-                        read -p "Press Enter to continue..."
-                    fi
+                    show_status
+                    read -p "Press Enter to continue..."
                     ;;
                 8)
-                    echo ""
-                    print_info "Restart Session"
-                    echo ""
-
-                    local sessions=($(tmux list-sessions 2>/dev/null | sed 's/:.*$//'))
-
-                    if [ ${#sessions[@]} -eq 0 ]; then
-                        print_warning "No running sessions found"
-                        read -p "Press Enter to continue..."
-                        continue
-                    fi
-
-                    echo "Running sessions:"
-                    local i=1
-                    for sess in "${sessions[@]}"; do
-                        echo "  [$i] $sess"
-                        ((i++))
-                    done
-                    echo ""
-
-                    read -p "Select session to restart: " restart_choice
-
-                    if [[ "$restart_choice" =~ ^[0-9]+$ ]] && [ "$restart_choice" -ge 1 ] && [ "$restart_choice" -le "${#sessions[@]}" ]; then
-                        local selected="${sessions[$((restart_choice-1))]}"
-                        restart_session "$selected"
-                        read -p "Press Enter to continue..."
-                    fi
+                    test_ssh_interactive
+                    read -p "Press Enter to continue..."
+                    ;;
+                9)
+                    configure
+                    read -p "Press Enter to continue..."
                     ;;
                 q|Q)
                     print_info "Goodbye!"
@@ -689,8 +1164,8 @@ main() {
             configure
             exit 0
             ;;
-        list-apps)
-            list_apps
+        hosts)
+            list_ssh_hosts
             exit 0
             ;;
         list)
@@ -744,11 +1219,46 @@ main() {
             restart_session "$restart_name"
             exit 0
             ;;
+        test)
+            local test_host="$1"
+            if [ -z "$test_host" ]; then
+                test_ssh_interactive
+            else
+                test_ssh_connection "$test_host"
+                echo ""
+                print_info "Checking for $REMOTE_CMD on $test_host..."
+                if check_remote_cmd "$test_host"; then
+                    print_success "$REMOTE_CMD is installed on $test_host"
+                else
+                    print_warning "$REMOTE_CMD not found on $test_host"
+                fi
+            fi
+            exit 0
+            ;;
+        status)
+            show_status
+            exit 0
+            ;;
+        sessions)
+            local sessions_host="$1"
+            if [ -z "$sessions_host" ]; then
+                print_error "Please specify a host"
+                print_info "Usage: session-manager sessions <host>"
+                exit 1
+            fi
+            list_remote_sessions "$sessions_host"
+            exit 0
+            ;;
+        kill-remote)
+            local kr_host="$1"
+            local kr_session="$2"
+            kill_remote_session "$kr_host" "$kr_session"
+            exit 0
+            ;;
         *)
-            # Treat first arg as app name, parse remaining args for flags
-            local app="$cmd"
+            # Treat first arg as host name, parse remaining args for flags
+            local host="$cmd"
             local session_name=""
-            local args=("$@")
 
             # Parse arguments
             while [ $# -gt 0 ]; do
@@ -758,7 +1268,11 @@ main() {
                         shift
                         ;;
                     --dir|-D)
-                        work_dir="$2"
+                        remote_dir="$2"
+                        shift 2
+                        ;;
+                    --cmd)
+                        custom_cmd="$2"
                         shift 2
                         ;;
                     *)
@@ -770,39 +1284,24 @@ main() {
                 esac
             done
 
-            # Validate app exists
-            if [ -z "${APP_CMDS[$app]}" ]; then
-                print_error "Unknown app: $app"
-                print_info "Use 'session-manager list-apps' to see available apps."
+            # Validate host exists in SSH config
+            if ! host_exists "$host"; then
+                print_error "Unknown host: $host"
+                print_info "Use 'sm hosts' to see available SSH hosts."
+                print_info "Add hosts to your SSH config: $SSH_CONFIG"
                 exit 1
             fi
 
-            # Expand tilde in path
-            work_dir="${work_dir/#\~/$HOME}"
+            # Use custom command if provided
+            local cmd_to_run="${custom_cmd:-$REMOTE_CMD}"
 
-            # Validate directory exists
-            if [ ! -d "$work_dir" ]; then
-                print_error "Directory does not exist: $work_dir"
-                exit 1
+            # Use smart connect for better UX with multiple sessions
+            local detach_flag="false"
+            if [ "$detach" = true ]; then
+                detach_flag="true"
             fi
 
-            # Generate session name if not provided
-            if [ -z "$session_name" ]; then
-                session_name="$app-$(date +%H%M)"
-            else
-                session_name="$app-$session_name"
-            fi
-
-            # Check if session exists - attach if so, create if not
-            if tmux has-session -t "$session_name" 2>/dev/null; then
-                print_info "Session '$session_name' already exists, attaching..."
-                attach_session "$session_name"
-            else
-                create_session "$app" "$session_name" "$work_dir"
-                if [ "$detach" = false ]; then
-                    attach_session "$session_name"
-                fi
-            fi
+            smart_connect "$host" "$session_name" "$remote_dir" "$cmd_to_run" "$detach_flag"
             exit 0
             ;;
     esac
