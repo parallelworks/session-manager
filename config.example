@@ -1,25 +1,62 @@
 # Session Manager Configuration
 # Copy this file to ~/.config/session-manager/config and update with your values
 
-# Claude Code CLI Configuration
-# Uncomment and set your API token
-# export SESSION_MANAGER_ANTHROPIC_AUTH_TOKEN="your-token-here"
+# =============================================================================
+# SSH Configuration
+# =============================================================================
 
-# Optional: Custom API base URL
-# export SESSION_MANAGER_ANTHROPIC_BASE_URL="https://api.anthropic.com"
-# Example for GLM endpoint:
-# export SESSION_MANAGER_ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic"
+# Path to SSH config file (default: ~/.ssh/config)
+# export SESSION_MANAGER_SSH_CONFIG="$HOME/.ssh/config"
 
-# Optional: API timeout in milliseconds
-# export SESSION_MANAGER_API_TIMEOUT_MS="3000000"
+# =============================================================================
+# Remote Session Configuration
+# =============================================================================
 
-# Optional: Model configurations
-# Default Claude models:
-# export SESSION_MANAGER_HAIKU_MODEL="claude-3-5-haiku"
-# export SESSION_MANAGER_SONNET_MODEL="claude-3-5-sonnet"
-# export SESSION_MANAGER_OPUS_MODEL="claude-3-opus"
+# Command to run on remote systems (default: bash)
+# Examples:
+#   export SESSION_MANAGER_REMOTE_CMD="bash"        # Default shell
+#   export SESSION_MANAGER_REMOTE_CMD="agent-deck"  # AgentDeck
+#   export SESSION_MANAGER_REMOTE_CMD="htop"        # System monitor
+#   export SESSION_MANAGER_REMOTE_CMD="nvim"        # Neovim editor
 
-# Example GLM models:
-# export SESSION_MANAGER_HAIKU_MODEL="glm-4.5-air"
-# export SESSION_MANAGER_SONNET_MODEL="glm-4.7"
-# export SESSION_MANAGER_OPUS_MODEL="glm-4.7"
+# export SESSION_MANAGER_REMOTE_CMD="bash"
+
+# Default remote working directory (default: ~)
+# export SESSION_MANAGER_REMOTE_DIR="~"
+
+# =============================================================================
+# Quick Start
+# =============================================================================
+#
+# 1. Add hosts to your SSH config (~/.ssh/config):
+#
+#    Host devserver
+#        Hostname 192.168.1.100
+#        User myuser
+#        IdentityFile ~/.ssh/id_rsa
+#
+#    Host prodbox
+#        Hostname prod.example.com
+#        User deploy
+#        Port 2222
+#
+# 2. Run session-manager:
+#
+#    sm hosts              # See available hosts
+#    sm devserver          # Connect to devserver
+#    sm status             # View all sessions
+#
+# =============================================================================
+# How It Works
+# =============================================================================
+#
+# When you run `sm devserver`:
+#   1. Creates local tmux session "remote-devserver"
+#   2. SSHs to devserver
+#   3. Creates remote tmux session "devserver"
+#   4. Runs your configured command inside remote tmux
+#
+# This means your session keeps running even if SSH disconnects.
+# Reconnecting (`sm devserver`) reattaches to the same session.
+#
+# To detach: Ctrl+B, then D

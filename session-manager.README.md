@@ -1,296 +1,344 @@
-# session-manager
+# Session Manager - Full Documentation
 
-Persistent terminal sessions using tmux. Run multiple background instances of different apps with separate contexts and easily reattach to them.
+Persistent remote terminal session management via SSH and tmux.
 
-## Quick Start
+## Table of Contents
 
-```bash
-# List available apps
-session-manager list-apps
+- [Overview](#overview)
+- [Installation](#installation)
+- [SSH Configuration](#ssh-configuration)
+- [Command Reference](#command-reference)
+- [Configuration](#configuration)
+- [Use Cases](#use-cases)
+- [Architecture](#architecture)
+- [tmux Quick Reference](#tmux-quick-reference)
+- [Troubleshooting](#troubleshooting)
+- [Advanced Usage](#advanced-usage)
 
-# Create a new claude session (named "myproject")
-session-manager claude myproject
-# Creates session: claude-myproject
+## Overview
 
-# Create a bash session
-session-manager bash scratch
-# Creates session: bash-scratch
+Session Manager connects to remote machines via SSH and runs commands inside persistent tmux sessions. This means:
 
-# List all running sessions
-session-manager list
+- **Sessions persist** even if your SSH connection drops
+- **Reconnect seamlessly** to the same session later
+- **Manage multiple hosts** from a single interface
+- **Run any command** - shells, editors, monitoring tools, AI agents
 
-# Attach to an existing session
-session-manager attach claude-myproject
-```
-
-## Available Apps
-
-| App | Description |
-|-----|-------------|
-| `claude` | Claude Code CLI (configure with `session-manager config`) |
-| `bash` | Interactive bash shell |
-| `opencode` | OpenCode editor TUI |
-
-## Command Line Interface
+## Installation
 
 ```bash
-session-manager <app> [name]           # Create or attach to <app> session
-session-manager <app> [name] [options] # Create session with options
-session-manager attach <name>          # Attach to specific session
-session-manager list                   # List all sessions
-session-manager list-apps              # List available apps
-session-manager kill <name>            # Kill a session
-session-manager info <name>            # Show session details
-session-manager restart <name>         # Restart a session
-session-manager config                 # Configure environment variables
-session-manager --version              # Show version
-session-manager                        # Interactive menu
-session-manager help                   # Show help
+git clone https://github.com/yourusername/session-manager.git
+cd session-manager
+./install.sh
 ```
 
-### Command Options
+The installer:
+- Copies `session-manager` to `~/.local/bin/`
+- Creates `sm` symlink for quick access
+- Adds `~/.local/bin` to your PATH
+
+After installation, use `sm` command.
+
+## SSH Configuration
+
+Session Manager reads hosts from `~/.ssh/config`.
+
+### Example SSH Config
+
+```
+Host dev
+    Hostname 192.168.1.100
+    User myuser
+    IdentityFile ~/.ssh/id_rsa
+
+Host production
+    Hostname prod.example.com
+    User deploy
+    Port 2222
+
+Host gpu
+    Hostname gpu.mycompany.com
+    User researcher
+```
+
+Verify hosts are detected:
+```bash
+sm hosts
+```
+
+## Command Reference
+
+### Core Commands
+
+| Command | Description |
+|---------|-------------|
+| `sm <host>` | Connect to host (creates or attaches) |
+| `sm <host> <name>` | Named session on host |
+| `sm status` | Dashboard showing all sessions |
+| `sm hosts` | List available SSH hosts |
+
+### Session Management
+
+| Command | Description |
+|---------|-------------|
+| `sm list` | List local tmux sessions |
+| `sm attach <name>` | Attach to local session |
+| `sm kill <name>` | Kill local session |
+| `sm info <name>` | Show session details |
+| `sm restart <name>` | Restart a session |
+
+### Remote Management
+
+| Command | Description |
+|---------|-------------|
+| `sm sessions <host>` | List tmux sessions on remote host |
+| `sm kill-remote <host> <session>` | Kill a session on remote host |
+| `sm test <host>` | Test SSH connection |
+
+### Options
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--detach` | `-d` | Create session without automatically attaching |
-| `--dir <path>` | `-D <path>` | Specify working directory for the session |
-| `--version` | `-V` | Show version information |
+| `--detach` | `-d` | Create session without attaching |
+| `--dir <path>` | `-D` | Set remote working directory |
+| `--cmd <command>` | | Override the command to run |
+| `--version` | `-V` | Show version |
+| `--help` | `-h` | Show help |
 
-## Session Naming
+## Configuration
 
-Sessions follow the pattern: `<app>-<name>`
+### Config File
 
-Examples:
-- `session-manager claude myproject` → creates session `claude-myproject`
-- `session-manager bash scratch` → creates session `bash-scratch`
-- `session-manager claude` → creates session `claude-HHMM` (auto-generated name)
-
-If a session with that name already exists, it will attach instead of creating a new one.
-
-## Adding New Apps
-
-To add a new app, edit the `session-manager` script and add a `register_app` call:
+Location: `~/.config/session-manager/config`
 
 ```bash
-register_app "appname" "command to run" \
-    "Description of the app" \
-    "ENV_VAR=\${SESSION_MANAGER_ENV_VAR} DEBUG=true"
+# Command to run on remote (default: bash)
+export SESSION_MANAGER_REMOTE_CMD="bash"
+
+# Default remote working directory
+export SESSION_MANAGER_REMOTE_DIR="~"
+
+# SSH config file location
+export SESSION_MANAGER_SSH_CONFIG="$HOME/.ssh/config"
 ```
 
-**Important**: Use `\$` to escape environment variables so they expand at runtime, not when the script is loaded.
+### Example Configurations
 
-### Example: Adding OpenCode
-
-Edit `~/.local/bin/session-manager` and add in the "ADD YOUR CUSTOM APPS" section:
-
- ```bash
-register_app "opencode" "opencode" \
-    "OpenCode editor TUI" \
-    ""
-```
-
-Now you can use it:
+**Default shell:**
 ```bash
-session-manager opencode myserver
-# Creates session: opencode-myserver
+export SESSION_MANAGER_REMOTE_CMD="bash"
 ```
 
-### Example: Adding an app with environment variables
+**AgentDeck (AI coding agent):**
+```bash
+export SESSION_MANAGER_REMOTE_CMD="agent-deck"
+```
+
+**System monitoring:**
+```bash
+export SESSION_MANAGER_REMOTE_CMD="htop"
+```
+
+**Editor:**
+```bash
+export SESSION_MANAGER_REMOTE_CMD="nvim"
+```
+
+### Per-Session Override
 
 ```bash
-register_app "myapp" "myapp --daemon" \
-    "My custom application" \
-    "API_KEY=\${SESSION_MANAGER_API_KEY} DEBUG=\${SESSION_MANAGER_DEBUG} NODE_ENV=production"
+sm dev --cmd htop          # Run htop on dev
+sm dev --cmd agent-deck    # Run agent-deck on dev
+sm dev --cmd "tail -f /var/log/syslog"  # Watch logs
 ```
 
-Then configure the values:
+## Use Cases
+
+### Remote Development with AgentDeck
+
 ```bash
-# Either via interactive config
-session-manager config
+# Configure AgentDeck as default
+echo 'export SESSION_MANAGER_REMOTE_CMD="agent-deck"' >> ~/.config/session-manager/config
 
-# Or set in ~/.config/session-manager/config
-export SESSION_MANAGER_API_KEY="your-api-key"
-export SESSION_MANAGER_DEBUG="true"
+# Connect to dev server
+sm dev
+
+# Work with AgentDeck...
+# Detach: Ctrl+B, D
+
+# Later, reconnect to same session
+sm dev
 ```
 
-## Interactive Mode
+### Multiple Projects on Same Host
 
-Run `session-manager` without arguments for an interactive menu:
+```bash
+sm dev frontend -D ~/projects/frontend
+sm dev backend -D ~/projects/backend
+sm dev infra -D ~/infrastructure
+
+# List all sessions
+sm list
+```
+
+### System Monitoring
+
+```bash
+sm server1 --cmd htop
+sm server2 --cmd "watch df -h"
+sm logs --cmd "tail -f /var/log/app.log"
+```
+
+### Quick Shell Access
+
+```bash
+# Default bash session
+sm dev
+
+# Named session for specific task
+sm dev debugging
+```
+
+## Architecture
+
+### How It Works
+
+When you run `sm dev`:
 
 ```
-╔════════════════════════════════════════╗
-║   Session Manager                     ║
-╚════════════════════════════════════════╝
-
- Available apps:
-   claude  Claude Code CLI
-   bash    Interactive bash shell
-  opencode  OpenCode editor TUI
-
-Running sessions: 2
-
-Options:
-  [1] Create new session
-  [2] Attach to session
-  [3] List sessions
-  [4] Kill session
-  [5] List apps
-  [6] Configure
-  [q] Quit
+┌─────────────────────────────────────────────────────────────┐
+│ Local Machine                                               │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ Local tmux session: "remote-dev"                     │   │
+│  │   └── SSH connection                                 │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            │ SSH
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Remote Server (dev)                                         │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ Remote tmux session: "dev"                           │   │
+│  │   └── your command (bash, agent-deck, etc.)          │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+### Persistence
+
+The dual-tmux architecture provides resilience:
+
+| Event | What Happens |
+|-------|--------------|
+| SSH drops | Remote tmux keeps your command running |
+| Close terminal | Local session persists, reconnect with `sm dev` |
+| Reboot local machine | Remote session still running |
+
+### Session Naming
+
+| Command | Local Session | Remote Session |
+|---------|---------------|----------------|
+| `sm dev` | `remote-dev` | `dev` |
+| `sm dev project` | `remote-dev-project` | `dev-project` |
 
 ## tmux Quick Reference
 
 | Action | Keybinding |
 |--------|------------|
-| Detach | `Ctrl+B` then `d` |
-| Scroll | `Ctrl+B` then `[`, arrows, `q` to quit |
-| New window | `Ctrl+B` then `c` |
-| Switch window | `Ctrl+B` then `0-9` |
-| List windows | `Ctrl+B` then `w` |
-| Rename session | `Ctrl+B` then `$` |
+| **Detach** | `Ctrl+B`, then `D` |
+| Scroll | `Ctrl+B`, then `[`, arrows, `Q` to exit |
+| New window | `Ctrl+B`, then `C` |
+| Switch window | `Ctrl+B`, then `0-9` |
+| List windows | `Ctrl+B`, then `W` |
+| Command mode | `Ctrl+B`, then `:` |
+
+## Troubleshooting
+
+### "Unknown host: xyz"
+
+Add the host to `~/.ssh/config`:
+```
+Host xyz
+    Hostname xyz.example.com
+    User myuser
+```
+
+### "command not found" on remote
+
+The command isn't in PATH on the remote. Either:
+1. Install it on the remote
+2. Use full path: `sm dev --cmd "/home/user/.local/bin/agent-deck"`
+3. Ensure it's in a standard location
+
+### Can't detach (Ctrl+B D not working)
+
+1. Make sure you're pressing `Ctrl+B`, release, then `D`
+2. Try `Ctrl+B` then `:` to open tmux command mode - if it works, type `detach`
+3. Check your local tmux config for prefix changes
+
+### Session won't reconnect
+
+```bash
+# Check local sessions
+sm list
+
+# Check remote sessions
+sm sessions dev
+
+# Kill stale local session and reconnect
+sm kill remote-dev
+sm dev
+```
 
 ## Advanced Usage
 
-### Session Information
-
-Use the `info` command to get detailed information about a session:
+### Batch Operations
 
 ```bash
-session-manager info claude-myproject
+# Start sessions on multiple hosts
+for host in dev staging prod; do
+    sm $host --detach
+done
+
+# Check status
+sm status
 ```
 
-This shows:
-- Session status (attached/detached)
-- Working directory
-- Running windows
-
-### Session Management
-
-Create multiple sessions for different projects or tasks:
+### Direct tmux Commands
 
 ```bash
-# Create sessions for different work contexts
-session-manager claude frontend --dir ~/projects/frontend
-session-manager claude backend --dir ~/projects/backend
-session-manager bash logs --dir ~/logs
+# Local
+tmux list-sessions
+tmux attach -t remote-dev
+tmux kill-session -t remote-dev
 
-# List and manage them
-session-manager list
-
-# Restart a session when needed
-session-manager restart claude-frontend
+# Remote
+ssh dev "tmux list-sessions"
+ssh dev "tmux kill-session -t dev"
 ```
 
-### Detached Sessions
-
-Use `--detach` to create sessions that run in the background:
+### Custom Working Directories
 
 ```bash
-# Start a long-running task in background
-session-manager bash build --dir ~/myproject --detach
-
-# Check on it later
-session-manager list
-session-manager attach bash-build
+sm dev -D ~/projects/myapp
+sm dev frontend -D ~/projects/frontend
 ```
 
-## Direct tmux Commands
+## Version History
 
-```bash
-# List all sessions
-tmux ls
+### v2.1.0
+- Added `sm status` dashboard
+- Added `sm sessions <host>` for remote session listing
+- Added `sm kill-remote` for remote cleanup
+- Smart connect with session picker
+- Generalized command configuration
 
-# Attach to session
-tmux attach -t <name>
+### v2.0.0
+- Complete rewrite for remote SSH focus
+- SSH config parsing
+- Dual tmux architecture
+- Configurable remote command
 
-# Kill session
-tmux kill-session -t <name>
-
-# Show session info
-tmux list-sessions -F "#{session_name}: #{?session_attached,(attached),(detached)} - #{window_name}"
-```
-
-## Examples
-
-```bash
-# Start a claude session for frontend work
-session-manager claude frontend
-
-# Start a bash session for quick commands
-session-manager bash shell1
-
-# Create a detached session (runs in background)
-session-manager claude myproject --detach
-
-# Create a session in a specific directory
-session-manager bash dev --dir ~/projects/myapp
-
-# Later, reattach to the frontend session
-session-manager attach claude-frontend
-
-# Show session details
-session-manager info claude-frontend
-
-# Restart a session (kill and recreate)
-session-manager restart claude-frontend
-
-# Or just use the app+name shortcut (auto-adds prefix)
-session-manager claude frontend
-```
-
-## Backward Compatibility
-
-The old `claude-session` command still works through a compatibility wrapper:
-
-```bash
-# Old commands still work
-claude-session new myproject
-claude-session attach myproject
-claude-session list
-claude-session kill myproject
-```
-
-## How It Works
-
-Each session runs the app's command in a persistent tmux session with:
-- The app's configured environment variables
-- The current working directory (or specified directory)
-- Full terminal context preserved on detach
-
-Detaching (`Ctrl+B` then `d`) keeps the session running in the background.
-
-## Configuration
-
-### Setting Environment Variables
-
-Run the interactive configuration:
-```bash
-session-manager config
-```
-
-This creates `~/.config/session-manager/config` with your settings.
-
-Or set environment variables in your shell config (~/.bashrc, ~/.zshrc):
-```bash
-export SESSION_MANAGER_ANTHROPIC_AUTH_TOKEN="your-token-here"
-export SESSION_MANAGER_ANTHROPIC_BASE_URL="https://api.anthropic.com"
-```
-
-### Config File Location
-
-- Linux/macOS: `~/.config/session-manager/config`
-- Config file is sourced automatically when session-manager runs
-
-### Claude Code CLI Variables
-
-- `SESSION_MANAGER_ANTHROPIC_AUTH_TOKEN` - Your Anthropic API token (required)
-- `SESSION_MANAGER_ANTHROPIC_BASE_URL` - API base URL (default: https://api.anthropic.com)
-- `SESSION_MANAGER_API_TIMEOUT_MS` - API timeout (default: 3000000)
-- `SESSION_MANAGER_HAIKU_MODEL` - Haiku model (default: claude-3-5-haiku)
-- `SESSION_MANAGER_SONNET_MODEL` - Sonnet model (default: claude-3-5-sonnet)
-- `SESSION_MANAGER_OPUS_MODEL` - Opus model (default: claude-3-opus)
-
-### Adding/Modifying Apps
-
-Edit `~/.local/bin/session-manager` to add new apps or modify existing ones (see "Adding New Apps" above).
+### v1.x
+- Local session management only
