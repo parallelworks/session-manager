@@ -25,6 +25,20 @@
 # export SESSION_MANAGER_REMOTE_DIR="~"
 
 # =============================================================================
+# Local Session Configuration
+# =============================================================================
+
+# Default local app for 'sm local' (no args) and 'sm .' commands
+# This lets you quickly launch your preferred app without specifying it
+# Available apps: bash, opencode, claude, agent-deck
+# Examples:
+#   export SESSION_MANAGER_LOCAL_APP="claude"       # Claude Code CLI
+#   export SESSION_MANAGER_LOCAL_APP="agent-deck"   # AgentDeck
+#   export SESSION_MANAGER_LOCAL_APP="bash"         # Basic shell
+
+# export SESSION_MANAGER_LOCAL_APP="agent-deck"
+
+# =============================================================================
 # Display Configuration
 # =============================================================================
 
@@ -53,6 +67,12 @@
 #    sm hosts              # See available hosts
 #    sm devserver          # Connect to devserver
 #    sm status             # View all sessions
+#
+# 3. Local sessions (if SESSION_MANAGER_LOCAL_APP is set):
+#
+#    sm .                  # Quick start default app in current dir
+#    sm local              # Start default local app
+#    sm local claude       # Start specific app
 #
 # =============================================================================
 # How It Works

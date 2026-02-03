@@ -20,6 +20,7 @@ fi
 SSH_CONFIG="${SESSION_MANAGER_SSH_CONFIG:-$HOME/.ssh/config}"
 REMOTE_CMD="${SESSION_MANAGER_REMOTE_CMD:-bash}"
 REMOTE_DIR="${SESSION_MANAGER_REMOTE_DIR:-~}"
+LOCAL_APP="${SESSION_MANAGER_LOCAL_APP:-}"
 FULLSCREEN="${SESSION_MANAGER_FULLSCREEN:-false}"
 
 # =============================================================================
@@ -479,9 +480,21 @@ list_local_apps() {
     local i=1
     for app in "${LOCAL_APP_NAMES[@]}"; do
         local desc=$(get_local_app_desc "$app")
-        printf "  ${CYAN}[%2d]${NC} %-15s %s\n" "$i" "$app" "$desc"
+        local default_marker=""
+        if [ "$app" = "$LOCAL_APP" ]; then
+            default_marker=" ${YELLOW}(default)${NC}"
+        fi
+        printf "  ${CYAN}[%2d]${NC} %-15s %s%b\n" "$i" "$app" "$desc" "$default_marker"
         i=$((i + 1))
     done
+
+    if [ -n "$LOCAL_APP" ]; then
+        echo ""
+        echo -e "  Default app: ${GREEN}$LOCAL_APP${NC} (used by 'sm .' and 'sm local')"
+    else
+        echo ""
+        echo "  No default app set. Run 'sm config' to set one."
+    fi
     echo ""
 }
 
@@ -623,6 +636,10 @@ show_status() {
     echo ""
 
     echo -e "${YELLOW}Quick Commands:${NC}"
+    if [ -n "$LOCAL_APP" ]; then
+        echo "  sm .                         Start $LOCAL_APP in current directory"
+        echo "  sm local                     Start $LOCAL_APP (default)"
+    fi
     echo "  sm local <app>               Start local app session"
     echo "  sm <host>                    Connect to remote host"
     echo "  sm sessions <host>           List sessions on host"
@@ -1074,7 +1091,11 @@ show_main_menu() {
     echo ""
 
     # Show local apps
-    echo -e "${GREEN}Local Apps:${NC} ${#LOCAL_APP_NAMES[@]} available"
+    local app_info="${#LOCAL_APP_NAMES[@]} available"
+    if [ -n "$LOCAL_APP" ]; then
+        app_info="$app_info, default: $LOCAL_APP"
+    fi
+    echo -e "${GREEN}Local Apps:${NC} $app_info"
     if [ ${#LOCAL_APP_NAMES[@]} -gt 0 ]; then
         local max_show=3
         local shown=0
@@ -1084,7 +1105,11 @@ show_main_menu() {
                 break
             fi
             local desc=$(get_local_app_desc "$app")
-            echo "  ${GREEN}$app${NC} - $desc"
+            local default_marker=""
+            if [ "$app" = "$LOCAL_APP" ]; then
+                default_marker=" ${YELLOW}(default)${NC}"
+            fi
+            echo -e "  ${GREEN}$app${NC} - $desc$default_marker"
             shown=$((shown + 1))
         done
     fi
@@ -1321,7 +1346,8 @@ test_ssh_interactive() {
 show_help() {
     cat << 'EOF'
 Usage: sm <host> [name]                   Start remote session on SSH host
-   or: sm local <app> [name]              Start local session with app
+   or: sm .                               Quick start default local app in current dir
+   or: sm local [app] [name]              Start local session (uses default if no app)
    or: sm local-apps                      List available local apps
    or: sm hosts                           List available SSH hosts
    or: sm recents [host]                  Show recent directories
@@ -1349,6 +1375,9 @@ Session naming patterns:
   Remote: remote-<host>-<timestamp|name>   (e.g., remote-dev-143052)
 
 Local Session Examples:
+  sm .                                     Quick start default app in current directory
+  sm . myproject                           Quick start default app with session name
+  sm local                                 Start default local app (or interactive if none set)
   sm local bash                            Start bash session
   sm local claude                          Start Claude Code in current directory
   sm local claude myproject                Named Claude session
@@ -1426,6 +1455,7 @@ Environment Variables:
   SESSION_MANAGER_SSH_CONFIG     SSH config file (default: ~/.ssh/config)
   SESSION_MANAGER_REMOTE_CMD     Command to run on remote (default: bash)
   SESSION_MANAGER_REMOTE_DIR     Default remote directory (default: ~)
+  SESSION_MANAGER_LOCAL_APP      Default local app for 'sm local' and 'sm .' (no default)
   SESSION_MANAGER_FULLSCREEN     Auto fullscreen on attach (default: false, macOS only)
 
 EOF
@@ -1471,6 +1501,24 @@ configure() {
     read -p "Remote command [bash]: " remote_cmd
     if [ -n "$remote_cmd" ]; then
         echo "export SESSION_MANAGER_REMOTE_CMD='$remote_cmd'" >> "$config_file"
+    fi
+
+    # Show available local apps
+    echo ""
+    echo "Available local apps:"
+    for app in "${LOCAL_APP_NAMES[@]}"; do
+        local desc=$(get_local_app_desc "$app")
+        echo "  - $app ($desc)"
+    done
+    echo ""
+
+    read -p "Default local app (for 'sm local' and 'sm .'): " local_app
+    if [ -n "$local_app" ]; then
+        if local_app_exists "$local_app"; then
+            echo "export SESSION_MANAGER_LOCAL_APP='$local_app'" >> "$config_file"
+        else
+            print_warning "App '$local_app' not found, skipping"
+        fi
     fi
 
     read -p "Default remote directory [~]: " remote_dir
@@ -1639,9 +1687,15 @@ main() {
                 esac
             done
 
+            # If no app specified, use configured default or fall back to interactive
             if [ -z "$app" ]; then
-                create_local_session_interactive
-                exit 0
+                if [ -n "$LOCAL_APP" ]; then
+                    app="$LOCAL_APP"
+                    print_info "Using default local app: $app"
+                else
+                    create_local_session_interactive
+                    exit 0
+                fi
             fi
 
             if ! local_app_exists "$app"; then
@@ -1767,6 +1821,56 @@ main() {
             local kr_host="$1"
             local kr_session="$2"
             kill_remote_session "$kr_host" "$kr_session"
+            exit 0
+            ;;
+        .)
+            # Quick shortcut: sm . launches default local app in current directory
+            if [ -z "$LOCAL_APP" ]; then
+                print_error "No default local app configured"
+                print_info "Set SESSION_MANAGER_LOCAL_APP in your config"
+                print_info "Run 'sm config' to configure, or 'sm local-apps' to see available apps"
+                exit 1
+            fi
+
+            if ! local_app_exists "$LOCAL_APP"; then
+                print_error "Configured default app '$LOCAL_APP' is not registered"
+                list_local_apps
+                exit 1
+            fi
+
+            local work_dir="$PWD"
+            local session_name=""
+
+            # Parse remaining arguments
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --detach|-d) detach=true; shift ;;
+                    --dir|-D) work_dir="$2"; shift 2 ;;
+                    *)
+                        if [ -z "$session_name" ]; then
+                            session_name="$1"
+                        fi
+                        shift
+                        ;;
+                esac
+            done
+
+            work_dir="${work_dir/#\~/$HOME}"
+            session_name="${session_name:-$(date +%H%M)}"
+            case "$session_name" in
+                $LOCAL_APP|$LOCAL_APP-*) ;;
+                *) session_name="$LOCAL_APP-$session_name" ;;
+            esac
+
+            if tmux has-session -t "$session_name" 2>/dev/null; then
+                print_info "Attaching to existing session '$session_name'..."
+                attach_session "$session_name"
+            else
+                create_local_session "$LOCAL_APP" "$session_name" "$work_dir"
+                if [ "$detach" != true ]; then
+                    attach_session "$session_name"
+                fi
+            fi
             exit 0
             ;;
         recents)
