@@ -3,7 +3,7 @@
 
 set -e
 
-VERSION="2.1.0"
+VERSION="2.2.0"
 
 # =============================================================================
 # CONFIGURATION - Load config file if exists
@@ -30,6 +30,92 @@ SSH_HOST_NAMES=()      # Host alias names
 SSH_HOST_HOSTNAMES=()  # Actual hostnames/IPs
 SSH_HOST_USERS=()      # Users for each host
 SSH_HOST_PORTS=()      # Ports for each host
+
+# =============================================================================
+# LOCAL APP REGISTRY (bash 3.2 compatible - using indexed arrays)
+# =============================================================================
+
+LOCAL_APP_NAMES=()      # App names
+LOCAL_APP_CMDS=()       # Commands to run
+LOCAL_APP_DESCS=()      # Descriptions
+LOCAL_APP_ENVS=()       # Environment variables
+
+# Register a local app
+register_local_app() {
+    local app="$1"
+    local cmd="$2"
+    local desc="$3"
+    local envs="${4:-}"
+
+    LOCAL_APP_NAMES+=("$app")
+    LOCAL_APP_CMDS+=("$cmd")
+    LOCAL_APP_DESCS+=("$desc")
+    LOCAL_APP_ENVS+=("$envs")
+}
+
+# Get index for app name (-1 if not found)
+get_local_app_index() {
+    local app="$1"
+    local i=0
+    for a in "${LOCAL_APP_NAMES[@]}"; do
+        if [ "$a" = "$app" ]; then
+            echo "$i"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    echo "-1"
+    return 1
+}
+
+# Check if local app exists
+local_app_exists() {
+    local idx=$(get_local_app_index "$1")
+    [ "$idx" != "-1" ]
+}
+
+# Get app command
+get_local_app_cmd() {
+    local idx=$(get_local_app_index "$1")
+    if [ "$idx" != "-1" ]; then
+        echo "${LOCAL_APP_CMDS[$idx]}"
+    fi
+}
+
+# Get app description
+get_local_app_desc() {
+    local idx=$(get_local_app_index "$1")
+    if [ "$idx" != "-1" ]; then
+        echo "${LOCAL_APP_DESCS[$idx]}"
+    fi
+}
+
+# Get app environment variables
+get_local_app_env() {
+    local idx=$(get_local_app_index "$1")
+    if [ "$idx" != "-1" ]; then
+        echo "${LOCAL_APP_ENVS[$idx]}"
+    fi
+}
+
+# =============================================================================
+# BUILT-IN LOCAL APPS
+# =============================================================================
+
+# Interactive bash shell
+register_local_app "bash" "bash --login" \
+    "Interactive bash shell" \
+    ""
+
+# OpenCode editor (terminal TUI)
+register_local_app "opencode" "opencode" \
+    "OpenCode editor TUI" \
+    ""
+
+# Claude Code CLI
+register_local_app "claude" "claude --dangerously-skip-permissions" \
+    "Claude Code CLI" \
+    "COLORTERM=truecolor"
 
 # =============================================================================
 # SSH CONFIG PARSER
@@ -214,6 +300,122 @@ check_remote_cmd() {
 }
 
 # =============================================================================
+# LOCAL SESSION MANAGEMENT
+# =============================================================================
+
+# Create local session for an app
+create_local_session() {
+    local app="$1"
+    local session_name="$2"
+    local work_dir="${3:-$PWD}"
+
+    if ! local_app_exists "$app"; then
+        print_error "Unknown local app: $app"
+        print_info "Use 'sm local-apps' to see available apps."
+        return 1
+    fi
+
+    local cmd=$(get_local_app_cmd "$app")
+    local envs=$(get_local_app_env "$app")
+    local desc=$(get_local_app_desc "$app")
+
+    print_info "Creating local session '$session_name'"
+    print_info "App: $app - $desc"
+    print_info "Directory: $work_dir"
+
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        print_warning "Session '$session_name' already exists, attaching..."
+        attach_session "$session_name"
+        return 0
+    fi
+
+    if [ ! -d "$work_dir" ]; then
+        print_error "Directory does not exist: $work_dir"
+        return 1
+    fi
+
+    local full_cmd=""
+    if [ -n "$envs" ]; then
+        full_cmd="export $envs && exec $cmd"
+    else
+        full_cmd="exec $cmd"
+    fi
+
+    tmux new-session -d -s "$session_name" -c "$work_dir" bash -c "$full_cmd"
+    print_success "Created local session '$session_name'"
+    print_info "Detach: Ctrl+B, D"
+}
+
+# Interactive local session creation
+create_local_session_interactive() {
+    echo ""
+    print_info "Create Local Session"
+    echo ""
+
+    if [ ${#LOCAL_APP_NAMES[@]} -eq 0 ]; then
+        print_warning "No local apps configured"
+        return 1
+    fi
+
+    echo "Available apps:"
+    local i=1
+    for app in "${LOCAL_APP_NAMES[@]}"; do
+        local desc=$(get_local_app_desc "$app")
+        printf "  [%2d] %-15s (%s)\n" "$i" "$app" "$desc"
+        i=$((i + 1))
+    done
+    echo ""
+
+    read -p "Select app: " app_choice
+
+    if ! echo "$app_choice" | grep -q "^[0-9]*$" || [ "$app_choice" -lt 1 ] || [ "$app_choice" -gt "${#LOCAL_APP_NAMES[@]}" ]; then
+        print_error "Invalid selection"
+        return 1
+    fi
+
+    local app="${LOCAL_APP_NAMES[$((app_choice-1))]}"
+
+    local default_name="$app-$(date +%H%M)"
+    read -p "Session name [$default_name]: " session_name
+    session_name="${session_name:-$default_name}"
+
+    local work_dir="$PWD"
+    read -p "Working directory [$work_dir]: " dir_input
+    dir_input="${dir_input:-$work_dir}"
+    dir_input="${dir_input/#\~/$HOME}"
+
+    create_local_session "$app" "$session_name" "$dir_input"
+
+    read -p "Attach to session now? [Y/n]: " attach
+    case "$attach" in
+        [Nn]*) ;;
+        *) attach_session "$session_name" ;;
+    esac
+}
+
+# List local apps
+list_local_apps() {
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════${NC}"
+    echo -e "${CYAN}Available Local Apps${NC}"
+    echo -e "${CYAN}════════════════════════════════════════${NC}"
+    echo ""
+
+    if [ ${#LOCAL_APP_NAMES[@]} -eq 0 ]; then
+        print_warning "No local apps configured"
+        return 1
+    fi
+
+    local i=1
+    for app in "${LOCAL_APP_NAMES[@]}"; do
+        local desc=$(get_local_app_desc "$app")
+        printf "  ${CYAN}[%2d]${NC} %-15s %s\n" "$i" "$app" "$desc"
+        i=$((i + 1))
+    done
+    echo ""
+}
+
+# =============================================================================
 # REMOTE SESSION MANAGEMENT
 # =============================================================================
 
@@ -282,22 +484,35 @@ show_status() {
     echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
-    # Show local sessions
-    echo -e "${YELLOW}Local Sessions:${NC}"
-    local local_sessions
-    local_sessions=$(tmux list-sessions 2>/dev/null) || true
+    # Show all tmux sessions
+    echo -e "${YELLOW}Sessions:${NC}"
+    local all_sessions
+    all_sessions=$(tmux list-sessions 2>/dev/null) || true
 
-    if [ -z "$local_sessions" ]; then
-        echo "  No local tmux sessions"
+    if [ -z "$all_sessions" ]; then
+        echo "  No tmux sessions"
     else
-        echo "$local_sessions" | while read -r line; do
+        echo "$all_sessions" | while read -r line; do
             local sess_name=$(echo "$line" | cut -d: -f1)
             case "$sess_name" in
                 remote-*)
-                    echo "  ${GREEN}●${NC} $line"
+                    echo "  ${CYAN}●${NC} $line (remote)"
                     ;;
                 *)
-                    echo "  ${BLUE}●${NC} $line"
+                    # Check if it's a local app session
+                    local is_app=false
+                    for app in "${LOCAL_APP_NAMES[@]}"; do
+                        case "$sess_name" in
+                            $app|$app-*)
+                                echo "  ${GREEN}●${NC} $line (local: $app)"
+                                is_app=true
+                                break
+                                ;;
+                        esac
+                    done
+                    if [ "$is_app" = false ]; then
+                        echo "  ${BLUE}●${NC} $line"
+                    fi
                     ;;
             esac
         done
@@ -338,7 +553,8 @@ show_status() {
     echo ""
 
     echo -e "${YELLOW}Quick Commands:${NC}"
-    echo "  sm <host>                    Connect to host"
+    echo "  sm local <app>               Start local app session"
+    echo "  sm <host>                    Connect to remote host"
     echo "  sm sessions <host>           List sessions on host"
     echo "  sm kill-remote <host> <sess> Kill remote session"
     echo ""
@@ -424,50 +640,6 @@ smart_connect() {
         fi
     fi
 }
-
-# =============================================================================
-# LOCAL APP REGISTRY (commented out - using remote SSH hosts instead)
-# =============================================================================
-
-# declare -A APP_CMDS
-# declare -A APP_DESCS
-# declare -A APP_ENVS
-# declare -a APP_ORDER
-
-# Register an app with command, description, and optional environment variables
-# register_app() {
-#     local app="$1"
-#     local cmd="$2"
-#     local desc="$3"
-#     local envs="${4:-}"
-#
-#     APP_CMDS[$app]="$cmd"
-#     APP_DESCS[$app]="$desc"
-#     if [ -n "$envs" ]; then
-#         APP_ENVS[$app]="$envs"
-#     fi
-#
-#     APP_ORDER+=("$app")
-# }
-
-# =============================================================================
-# BUILT-IN APPS (commented out - using AgentDeck on remote hosts)
-# =============================================================================
-
-# # Interactive bash shell
-# register_app "bash" "bash --login" \
-#     "Interactive bash shell" \
-#     ""
-#
-# # OpenCode editor (terminal TUI)
-# register_app "opencode" "opencode" \
-#     "OpenCode editor TUI" \
-#     ""
-#
-# # Claude Code CLI - configure via env vars or config file
-# register_app "claude" "claude --dangerously-skip-permissions" \
-#     "Claude Code CLI" \
-#     "COLORTERM=truecolor ANTHROPIC_BASE_URL=\${SESSION_MANAGER_ANTHROPIC_BASE_URL:-https://api.anthropic.com} API_TIMEOUT_MS=\${SESSION_MANAGER_API_TIMEOUT_MS:-3000000} ANTHROPIC_DEFAULT_HAIKU_MODEL=\${SESSION_MANAGER_HAIKU_MODEL:-claude-3-5-haiku} ANTHROPIC_DEFAULT_SONNET_MODEL=\${SESSION_MANAGER_SONNET_MODEL:-claude-3-5-sonnet} ANTHROPIC_DEFAULT_OPUS_MODEL=\${SESSION_MANAGER_OPUS_MODEL:-claude-3-opus} ANTHROPIC_AUTH_TOKEN=\${SESSION_MANAGER_ANTHROPIC_AUTH_TOKEN}"
 
 # =============================================================================
 # CORE FUNCTIONALITY
@@ -648,6 +820,65 @@ kill_session() {
     print_success "Killed session '$session_name'"
 }
 
+# Rename session
+rename_session() {
+    local old_name="$1"
+    local new_name="$2"
+
+    if ! tmux has-session -t "$old_name" 2>/dev/null; then
+        print_error "Session '$old_name' not found"
+        return 1
+    fi
+
+    if tmux has-session -t "$new_name" 2>/dev/null; then
+        print_error "Session '$new_name' already exists"
+        return 1
+    fi
+
+    tmux rename-session -t "$old_name" "$new_name"
+    print_success "Renamed '$old_name' to '$new_name'"
+}
+
+# Rename session interactively
+rename_session_interactive() {
+    echo ""
+    print_info "Rename a session"
+    echo ""
+
+    local sessions=($(tmux list-sessions 2>/dev/null | sed 's/:.*$//'))
+
+    if [ ${#sessions[@]} -eq 0 ]; then
+        print_warning "No running sessions found"
+        return
+    fi
+
+    echo "Running sessions:"
+    local i=1
+    for sess in "${sessions[@]}"; do
+        echo "  [$i] $sess"
+        i=$((i + 1))
+    done
+    echo ""
+
+    read -p "Select session to rename (or 'q' to cancel): " choice
+
+    case "$choice" in
+        q|Q) return ;;
+    esac
+
+    if echo "$choice" | grep -q "^[0-9]*$" && [ "$choice" -ge 1 ] && [ "$choice" -le "${#sessions[@]}" ]; then
+        local selected="${sessions[$((choice-1))]}"
+        read -p "New name for '$selected': " new_name
+        if [ -n "$new_name" ]; then
+            rename_session "$selected" "$new_name"
+        else
+            print_error "No name provided"
+        fi
+    else
+        print_error "Invalid selection"
+    fi
+}
+
 # Show available sessions and let user pick
 show_sessions() {
     echo ""
@@ -694,8 +925,25 @@ show_main_menu() {
     echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
     echo ""
 
+    # Show local apps
+    echo -e "${GREEN}Local Apps:${NC} ${#LOCAL_APP_NAMES[@]} available"
+    if [ ${#LOCAL_APP_NAMES[@]} -gt 0 ]; then
+        local max_show=3
+        local shown=0
+        for app in "${LOCAL_APP_NAMES[@]}"; do
+            if [ $shown -ge $max_show ]; then
+                echo "  ${GREEN}...${NC} and $((${#LOCAL_APP_NAMES[@]} - max_show)) more"
+                break
+            fi
+            local desc=$(get_local_app_desc "$app")
+            echo "  ${GREEN}$app${NC} - $desc"
+            shown=$((shown + 1))
+        done
+    fi
+    echo ""
+
     # Show available SSH hosts
-    echo "SSH Hosts: ${#SSH_HOST_NAMES[@]} configured"
+    echo -e "${CYAN}SSH Hosts:${NC} ${#SSH_HOST_NAMES[@]} configured"
     if [ ${#SSH_HOST_NAMES[@]} -gt 0 ]; then
         local max_show=5
         local shown=0
@@ -716,15 +964,18 @@ show_main_menu() {
     echo ""
 
     echo "Options:"
-    echo "  [1] Connect to remote host"
-    echo "  [2] Attach to session"
-    echo "  [3] List local sessions"
-    echo "  [4] Kill local session"
-    echo "  [5] List SSH hosts"
-    echo "  [6] List remote sessions on host"
-    echo "  [7] Status dashboard"
-    echo "  [8] Test SSH connection"
-    echo "  [9] Configure"
+    echo "  ${GREEN}[1] Create local session${NC}"
+    echo "  ${CYAN}[2] Connect to remote host${NC}"
+    echo "  [3] Attach to session"
+    echo "  [4] List sessions"
+    echo "  [5] Kill session"
+    echo "  [6] Rename session"
+    echo "  [7] List local apps"
+    echo "  [8] List SSH hosts"
+    echo "  [9] List remote sessions on host"
+    echo "  [s] Status dashboard"
+    echo "  [t] Test SSH connection"
+    echo "  [c] Configure"
     echo "  [q] Quit"
     echo ""
 }
@@ -921,14 +1172,17 @@ test_ssh_interactive() {
 
 show_help() {
     cat << 'EOF'
-Usage: sm <host> [name]                   Start session on remote host
+Usage: sm <host> [name]                   Start remote session on SSH host
+   or: sm local <app> [name]              Start local session with app
+   or: sm local-apps                      List available local apps
    or: sm hosts                           List available SSH hosts
    or: sm status                          Dashboard of all sessions
    or: sm sessions <host>                 List tmux sessions on remote host
    or: sm list                            List local tmux sessions
-   or: sm attach <name>                   Attach to local session
-   or: sm kill <name>                     Kill local session
+   or: sm attach <name>                   Attach to session
+   or: sm kill <name>                     Kill session
    or: sm kill-remote <host> <session>    Kill remote tmux session
+   or: sm rename <old> <new>              Rename a session
    or: sm info <name>                     Show session details
    or: sm restart <name>                  Restart a session
    or: sm test <host>                     Test SSH connection
@@ -938,18 +1192,24 @@ Usage: sm <host> [name]                   Start session on remote host
 
 Options:
   --detach, -d                        Create session without attaching
-  --dir <path>, -D <path>             Specify remote working directory
-  --cmd <command>                     Override default command (default: bash)
+  --dir <path>, -D <path>             Specify working directory
 
-Session naming pattern: remote-<host>[-name]
-Example: sm myserver work  →  creates session "remote-myserver-work"
+Session naming patterns:
+  Local:  <app>-<name>           (e.g., claude-myproject)
+  Remote: remote-<host>[-name]   (e.g., remote-dev-myproject)
 
-Examples:
+Local Session Examples:
+  sm local bash                            Start bash session
+  sm local claude                          Start Claude Code session
+  sm local claude myproject                Named Claude session
+  sm local opencode -D ~/code              Start opencode in specific directory
+  sm local-apps                            List available apps
+
+Remote Session Examples:
   sm dev                                   Connect to dev (creates or attaches)
   sm dev project                           Named session on dev
   sm dev --detach                          Create without attaching
   sm dev -D ~/code                         Start in specific remote directory
-  sm dev --cmd htop                        Run htop instead of default
 
   sm status                                Show all sessions dashboard
   sm hosts                                 List available SSH hosts
@@ -1084,24 +1344,35 @@ main() {
 
             case "$choice" in
                 1)
-                    create_remote_session_interactive
+                    create_local_session_interactive
                     ;;
                 2)
-                    show_sessions
+                    create_remote_session_interactive
                     ;;
                 3)
+                    show_sessions
+                    ;;
+                4)
                     list_all_sessions
                     read -p "Press Enter to continue..."
                     ;;
-                4)
+                5)
                     kill_session_interactive
                     read -p "Press Enter to continue..."
                     ;;
-                5)
+                6)
+                    rename_session_interactive
+                    read -p "Press Enter to continue..."
+                    ;;
+                7)
+                    list_local_apps
+                    read -p "Press Enter to continue..."
+                    ;;
+                8)
                     list_ssh_hosts
                     read -p "Press Enter to continue..."
                     ;;
-                6)
+                9)
                     # List remote sessions on a host
                     echo ""
                     print_info "List Remote Sessions"
@@ -1129,15 +1400,15 @@ main() {
                     fi
                     read -p "Press Enter to continue..."
                     ;;
-                7)
+                s|S)
                     show_status
                     read -p "Press Enter to continue..."
                     ;;
-                8)
+                t|T)
                     test_ssh_interactive
                     read -p "Press Enter to continue..."
                     ;;
-                9)
+                c|C)
                     configure
                     read -p "Press Enter to continue..."
                     ;;
@@ -1168,6 +1439,60 @@ main() {
             ;;
         hosts)
             list_ssh_hosts
+            exit 0
+            ;;
+        local-apps)
+            list_local_apps
+            exit 0
+            ;;
+        local)
+            # Handle: sm local <app> [name] [options]
+            local app="$1"
+            shift || true
+            local session_name=""
+            local work_dir="$PWD"
+
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --detach|-d) detach=true; shift ;;
+                    --dir|-D) work_dir="$2"; shift 2 ;;
+                    *)
+                        if [ -z "$session_name" ]; then
+                            session_name="$1"
+                        fi
+                        shift
+                        ;;
+                esac
+            done
+
+            if [ -z "$app" ]; then
+                create_local_session_interactive
+                exit 0
+            fi
+
+            if ! local_app_exists "$app"; then
+                print_error "Unknown local app: $app"
+                list_local_apps
+                exit 1
+            fi
+
+            work_dir="${work_dir/#\~/$HOME}"
+            session_name="${session_name:-$(date +%H%M)}"
+            # Prepend app name if not already included
+            case "$session_name" in
+                $app|$app-*) ;;
+                *) session_name="$app-$session_name" ;;
+            esac
+
+            if tmux has-session -t "$session_name" 2>/dev/null; then
+                print_info "Attaching to existing session '$session_name'..."
+                attach_session "$session_name"
+            else
+                create_local_session "$app" "$session_name" "$work_dir"
+                if [ "$detach" != true ]; then
+                    attach_session "$session_name"
+                fi
+            fi
             exit 0
             ;;
         list)
@@ -1219,6 +1544,19 @@ main() {
                 exit 1
             fi
             restart_session "$restart_name"
+            exit 0
+            ;;
+        rename)
+            local old_name="$1"
+            local new_name="$2"
+            if [ -z "$old_name" ]; then
+                rename_session_interactive
+            elif [ -z "$new_name" ]; then
+                print_error "Usage: sm rename <old-name> <new-name>"
+                exit 1
+            else
+                rename_session "$old_name" "$new_name"
+            fi
             exit 0
             ;;
         test)
