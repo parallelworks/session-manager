@@ -3,7 +3,7 @@
 
 set -e
 
-VERSION="2.2.0"
+VERSION="2.3.0"
 
 # =============================================================================
 # CONFIGURATION - Load config file if exists
@@ -20,6 +20,7 @@ fi
 SSH_CONFIG="${SESSION_MANAGER_SSH_CONFIG:-$HOME/.ssh/config}"
 REMOTE_CMD="${SESSION_MANAGER_REMOTE_CMD:-bash}"
 REMOTE_DIR="${SESSION_MANAGER_REMOTE_DIR:-~}"
+FULLSCREEN="${SESSION_MANAGER_FULLSCREEN:-false}"
 
 # =============================================================================
 # SSH HOST REGISTRY (bash 3.2 compatible - using indexed arrays)
@@ -810,7 +811,28 @@ create_remote_session_interactive() {
 # Attach to session
 attach_session() {
     local session_name="$1"
+
+    # Trigger fullscreen mode on macOS if enabled
+    if [ "$FULLSCREEN" = "true" ] && [ "$(uname)" = "Darwin" ]; then
+        trigger_fullscreen &
+    fi
+
     tmux attach-session -t "$session_name"
+}
+
+# Trigger fullscreen mode on macOS Terminal
+trigger_fullscreen() {
+    # Small delay to ensure terminal window is ready
+    sleep 0.3
+    osascript -e '
+    tell application "System Events"
+        tell process "Terminal"
+            if exists menu item "Enter Full Screen" of menu "View" of menu bar 1 then
+                click menu item "Enter Full Screen" of menu "View" of menu bar 1
+            end if
+        end tell
+    end tell
+    ' 2>/dev/null || true
 }
 
 # Kill session
@@ -1260,6 +1282,7 @@ Environment Variables:
   SESSION_MANAGER_SSH_CONFIG     SSH config file (default: ~/.ssh/config)
   SESSION_MANAGER_REMOTE_CMD     Command to run on remote (default: bash)
   SESSION_MANAGER_REMOTE_DIR     Default remote directory (default: ~)
+  SESSION_MANAGER_FULLSCREEN     Auto fullscreen on attach (default: false, macOS only)
 
 EOF
 }
@@ -1310,6 +1333,13 @@ configure() {
     if [ -n "$remote_dir" ]; then
         echo "export SESSION_MANAGER_REMOTE_DIR='$remote_dir'" >> "$config_file"
     fi
+
+    read -p "Auto fullscreen on attach? (macOS only) [y/N]: " fullscreen
+    case "$fullscreen" in
+        [Yy]*)
+            echo "export SESSION_MANAGER_FULLSCREEN='true'" >> "$config_file"
+            ;;
+    esac
 
     chmod 600 "$config_file"
     print_success "Configuration saved to $config_file"

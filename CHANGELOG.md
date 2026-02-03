@@ -2,6 +2,12 @@
 
 All notable changes to session-manager will be documented in this file.
 
+## [2.3.0] - 2025-02-02
+
+### Added
+- `SESSION_MANAGER_FULLSCREEN` config option to auto-enter fullscreen when attaching to sessions (macOS only)
+- Fullscreen prompt in interactive `sm config` command
+
 ## [2.2.0] - 2025-02-02
 
 ### Added

@@ -25,6 +25,14 @@
 # export SESSION_MANAGER_REMOTE_DIR="~"
 
 # =============================================================================
+# Display Configuration
+# =============================================================================
+
+# Automatically enter fullscreen mode when attaching to sessions (macOS only)
+# Set to "true" to enable fullscreen mode when sessions are attached
+# export SESSION_MANAGER_FULLSCREEN="true"
+
+# =============================================================================
 # Quick Start
 # =============================================================================
 #
