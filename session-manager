@@ -3,7 +3,7 @@
 
 set -e
 
-VERSION="2.4.0"
+VERSION="2.5.0"
 
 # =============================================================================
 # CONFIGURATION - Load config file if exists
@@ -21,6 +21,59 @@ SSH_CONFIG="${SESSION_MANAGER_SSH_CONFIG:-$HOME/.ssh/config}"
 REMOTE_CMD="${SESSION_MANAGER_REMOTE_CMD:-bash}"
 REMOTE_DIR="${SESSION_MANAGER_REMOTE_DIR:-~}"
 FULLSCREEN="${SESSION_MANAGER_FULLSCREEN:-false}"
+
+# =============================================================================
+# RECENT DIRECTORIES - Track recently used directories per host
+# =============================================================================
+
+RECENTS_DIR="$CONFIG_DIR/recents"
+MAX_RECENTS=10
+
+# Ensure recents directory exists
+mkdir -p "$RECENTS_DIR" 2>/dev/null || true
+
+# Get recent directories for a host (returns newline-separated list)
+get_recent_dirs() {
+    local host="$1"
+    local recents_file="$RECENTS_DIR/$host"
+    if [ -f "$recents_file" ]; then
+        cat "$recents_file"
+    fi
+}
+
+# Add a directory to recent list for a host
+add_recent_dir() {
+    local host="$1"
+    local dir="$2"
+    local recents_file="$RECENTS_DIR/$host"
+
+    # Skip if dir is just ~ or empty
+    if [ -z "$dir" ] || [ "$dir" = "~" ]; then
+        return
+    fi
+
+    # Create temp file with new dir at top, removing duplicates
+    local temp_file="${recents_file}.tmp"
+    echo "$dir" > "$temp_file"
+
+    if [ -f "$recents_file" ]; then
+        # Add existing entries, excluding the one we just added
+        grep -v "^${dir}$" "$recents_file" 2>/dev/null >> "$temp_file" || true
+    fi
+
+    # Keep only MAX_RECENTS entries
+    head -n "$MAX_RECENTS" "$temp_file" > "$recents_file"
+    rm -f "$temp_file"
+}
+
+# Get the most recent directory for a host
+get_last_dir() {
+    local host="$1"
+    local recents_file="$RECENTS_DIR/$host"
+    if [ -f "$recents_file" ]; then
+        head -n 1 "$recents_file"
+    fi
+}
 
 # =============================================================================
 # SSH HOST REGISTRY (bash 3.2 compatible - using indexed arrays)
@@ -730,7 +783,7 @@ create_remote_session() {
 
     print_info "Creating remote session '$session_name'"
     print_info "Host: $host ($(get_host_display "$host"))"
-    print_info "Remote tmux session: $remote_session"
+    print_info "Directory: $remote_dir"
     print_info "Command: $cmd"
 
     # Check if local session already exists
@@ -753,6 +806,10 @@ create_remote_session() {
 
     # Create local tmux session with SSH command
     tmux new-session -d -s "$session_name" bash -c "$ssh_cmd"
+
+    # Save directory to recents for this host
+    add_recent_dir "$host" "$remote_dir"
+
     print_success "Created remote session '$session_name'"
     print_info "Remote tmux session '$remote_session' on $host"
     print_info "Detach: Ctrl+B, D"
@@ -789,14 +846,54 @@ create_remote_session_interactive() {
 
     local host="${SSH_HOST_NAMES[$((host_choice-1))]}"
 
-    # Get session name
-    local default_name="remote-$host"
+    # Get session name (use timestamp by default)
+    local default_name="remote-$host-$(date +%H%M%S)"
     read -p "Session name [$default_name]: " session_name
     session_name="${session_name:-$default_name}"
 
-    # Get remote directory
-    read -p "Remote directory [$REMOTE_DIR]: " remote_dir
-    remote_dir="${remote_dir:-$REMOTE_DIR}"
+    # Get remote directory - show recents if available
+    local last_dir=$(get_last_dir "$host")
+    local default_dir="${last_dir:-$REMOTE_DIR}"
+    local recents=$(get_recent_dirs "$host")
+
+    if [ -n "$recents" ]; then
+        echo ""
+        echo "Recent directories for $host:"
+        local dir_array=()
+        local j=1
+        while IFS= read -r dir; do
+            dir_array+=("$dir")
+            printf "  [%d] %s\n" "$j" "$dir"
+            j=$((j + 1))
+        done <<< "$recents"
+        echo "  [n] Enter new directory"
+        echo ""
+
+        read -p "Select directory or enter path [$default_dir]: " dir_choice
+
+        case "$dir_choice" in
+            [0-9]*)
+                if [ "$dir_choice" -ge 1 ] && [ "$dir_choice" -le "${#dir_array[@]}" ]; then
+                    remote_dir="${dir_array[$((dir_choice-1))]}"
+                else
+                    remote_dir="$dir_choice"  # Treat as path
+                fi
+                ;;
+            n|N)
+                read -p "Enter directory path: " remote_dir
+                remote_dir="${remote_dir:-$REMOTE_DIR}"
+                ;;
+            "")
+                remote_dir="$default_dir"
+                ;;
+            *)
+                remote_dir="$dir_choice"  # Treat as path
+                ;;
+        esac
+    else
+        read -p "Remote directory [$REMOTE_DIR]: " remote_dir
+        remote_dir="${remote_dir:-$REMOTE_DIR}"
+    fi
 
     # Test connection option
     read -p "Test connection first? [y/N]: " test_conn
@@ -1222,6 +1319,7 @@ Usage: sm <host> [name]                   Start remote session on SSH host
    or: sm local <app> [name]              Start local session with app
    or: sm local-apps                      List available local apps
    or: sm hosts                           List available SSH hosts
+   or: sm recents [host]                  Show recent directories
    or: sm status                          Dashboard of all sessions
    or: sm sessions <host>                 List tmux sessions on remote host
    or: sm list                            List local tmux sessions
@@ -1239,7 +1337,7 @@ Usage: sm <host> [name]                   Start remote session on SSH host
 Options:
   --detach, -d                        Create session without attaching
   --new, -n                           Force create new session (don't attach to existing)
-  --dir <path>, -D <path>             Specify working directory
+  --dir <path>, -D <path>             Specify working directory (overrides last used)
 
 Session naming patterns:
   Local:  <app>-<name>                     (e.g., claude-myproject)
@@ -1254,7 +1352,7 @@ Local Session Examples:
   sm local-apps                            List available apps
 
 Remote Session Examples:
-  sm dev                                   Connect to dev (shows picker if sessions exist)
+  sm dev                                   Connect to dev (uses last directory)
   sm dev -n                                Force new session on dev (timestamp named)
   sm dev project                           Named session on dev
   sm dev project -n                        Force new session even if 'project' exists
@@ -1263,6 +1361,8 @@ Remote Session Examples:
 
   sm status                                Show all sessions dashboard
   sm hosts                                 List available SSH hosts
+  sm recents                               Show recent directories for all hosts
+  sm recents dev                           Show recent directories for dev
   sm sessions dev                          List tmux sessions on dev
   sm list                                  List local sessions
 
@@ -1277,6 +1377,12 @@ Concurrent Sessions:
   Each invocation creates a unique session by default (timestamp-based naming).
   When sessions exist for a host, you'll see a picker to choose or create new.
   Use -n/--new to skip the picker and always create a new session.
+
+Recent Directories:
+  Session manager remembers the last 10 directories used per host.
+  When creating a new session, it automatically uses your last directory.
+  Use -D to override, or 'sm recents' to see saved directories.
+  Interactive mode shows recent directories as numbered options.
 
 Detaching:
   Ctrl+B, D                               Detach from session (keeps it running)
@@ -1658,11 +1764,54 @@ main() {
             kill_remote_session "$kr_host" "$kr_session"
             exit 0
             ;;
+        recents)
+            local recents_host="$1"
+            if [ -z "$recents_host" ]; then
+                # Show recents for all hosts
+                echo ""
+                echo -e "${CYAN}════════════════════════════════════════${NC}"
+                echo -e "${CYAN}Recent Directories by Host${NC}"
+                echo -e "${CYAN}════════════════════════════════════════${NC}"
+                echo ""
+                local found=false
+                for host in "${SSH_HOST_NAMES[@]}"; do
+                    local dirs=$(get_recent_dirs "$host")
+                    if [ -n "$dirs" ]; then
+                        found=true
+                        echo -e "${GREEN}$host:${NC}"
+                        echo "$dirs" | while read -r dir; do
+                            echo "  $dir"
+                        done
+                        echo ""
+                    fi
+                done
+                if [ "$found" = false ]; then
+                    echo "  No recent directories recorded yet."
+                    echo "  Directories are saved when you create remote sessions."
+                fi
+                echo ""
+            else
+                # Show recents for specific host
+                echo ""
+                echo -e "${CYAN}Recent directories for $recents_host:${NC}"
+                local dirs=$(get_recent_dirs "$recents_host")
+                if [ -n "$dirs" ]; then
+                    echo "$dirs" | while read -r dir; do
+                        echo "  $dir"
+                    done
+                else
+                    echo "  No recent directories for $recents_host"
+                fi
+                echo ""
+            fi
+            exit 0
+            ;;
         *)
             # Treat first arg as host name, parse remaining args for flags
             local host="$cmd"
             local session_name=""
             local force_new=false
+            local dir_specified=false
 
             # Parse arguments
             while [ $# -gt 0 ]; do
@@ -1677,6 +1826,7 @@ main() {
                         ;;
                     --dir|-D)
                         remote_dir="$2"
+                        dir_specified=true
                         shift 2
                         ;;
                     --cmd)
@@ -1698,6 +1848,14 @@ main() {
                 print_info "Use 'sm hosts' to see available SSH hosts."
                 print_info "Add hosts to your SSH config: $SSH_CONFIG"
                 exit 1
+            fi
+
+            # Use last directory for this host if no explicit -D provided
+            if [ "$dir_specified" = false ]; then
+                local last_dir=$(get_last_dir "$host")
+                if [ -n "$last_dir" ]; then
+                    remote_dir="$last_dir"
+                fi
             fi
 
             # Use custom command if provided
