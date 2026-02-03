@@ -2,28 +2,62 @@
 
 All notable changes to session-manager will be documented in this file.
 
-## [Unreleased]
+## [2.3.0] - 2025-02-02
+
+### Added
+- `SESSION_MANAGER_FULLSCREEN` config option to auto-enter fullscreen when attaching to sessions (macOS only)
+- Fullscreen prompt in interactive `sm config` command
+
+## [2.2.0] - 2025-02-02
+
+### Added
+- **Local session support restored** - Run bash, opencode, claude locally
+- `sm local <app> [name]` command for creating local app sessions
+- `sm local-apps` command to list available local apps
+- `sm rename <old> <new>` command to rename running sessions
+- SessionManager.app for macOS (opens Terminal in full-screen mode)
+- SwiftBar/xbar menu bar plugin (`session-manager-menubar.1h.sh`)
+- App icons included in `icons/` directory
+- Interactive menu option for renaming sessions
+
+### Changed
+- Install script now prompts to create SessionManager.app on macOS
+- Install script configures SwiftBar plugin to `~/swiftbar-plugins`
+- Interactive menu reorganized with local and remote session options
+- Status dashboard shows local app sessions with app name
+
+## [2.1.0] - 2025-02-01
+
+### Added
+- **Remote SSH session management** - Connect to hosts via SSH with persistent tmux
+- Dual-tmux architecture (local + remote) for network resilience
+- SSH config parser - auto-discovers hosts from `~/.ssh/config`
+- `sm <host> [name]` for quick remote connections
+- `sm hosts` to list available SSH hosts
+- `sm sessions <host>` to list remote tmux sessions
+- `sm kill-remote <host> <session>` to kill remote sessions
+- `sm status` dashboard showing local and remote sessions
+- `sm test <host>` to test SSH connections
+- `--cmd <command>` flag to override default remote command
+- Smart connect with session picker for multiple sessions per host
+
+### Changed
+- Complete architectural rewrite for remote-first workflow
+- Session naming pattern: `remote-<host>[-name]`
+- Configuration focused on SSH and remote commands
+
+## [1.2.0] - 2025-01-09
 
 ### Added
 - `--detach` / `-d` flag to create sessions without automatically attaching
-- `--dir` / `-D` flag to specify working directory when creating sessions from CLI
-- `info` command to show detailed session information (status, working directory, windows)
-- `restart` command to kill and recreate a session with the same configuration
+- `--dir` / `-D` flag to specify working directory when creating sessions
+- `info` command to show detailed session information
+- `restart` command to kill and recreate a session
 - `--version` / `-V` flag to display version information
-- Interactive menu options for session info and restart functionality
-- Version constant (1.2.0) for tracking releases
 
 ### Changed
 - Updated OpenCode app to run as TUI instead of server mode
-- Improved color handling in session-manager using $'' syntax for better compatibility
-- Changed print functions to use `printf` instead of `echo -e` for improved portability
-- Enhanced session creation with working directory validation
-- Expanded interactive menu to include 8 options instead of 6
-
-### Added
-- Automatic PATH configuration during installation - adds `~/.local/bin` to PATH if not present
-- `sm` alias created during installation for quick access to session-manager
-- Enhanced installation output with clearer messaging
+- Improved color handling using $'' syntax for better compatibility
 
 ## [1.1.0] - 2025-01-08
 
@@ -34,11 +68,3 @@ All notable changes to session-manager will be documented in this file.
 - Support for multiple apps (bash, claude, opencode)
 - Environment variable configuration
 - Session creation, attachment, listing, and killing
-- Comprehensive documentation
-
-### Features
-- Persistent tmux-based sessions
-- App registry system for easy app management
-- Automatic session naming with patterns
-- Working directory support
-- Interactive and command-line interfaces

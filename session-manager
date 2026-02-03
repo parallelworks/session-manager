@@ -3,7 +3,7 @@
 
 set -e
 
-VERSION="2.1.0"
+VERSION="2.5.0"
 
 # =============================================================================
 # CONFIGURATION - Load config file if exists
@@ -11,13 +11,70 @@ VERSION="2.1.0"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/session-manager"
 CONFIG_FILE="$CONFIG_DIR/config"
-SSH_CONFIG="${SESSION_MANAGER_SSH_CONFIG:-$HOME/.ssh/config}"
-REMOTE_CMD="${SESSION_MANAGER_REMOTE_CMD:-bash}"
-REMOTE_DIR="${SESSION_MANAGER_REMOTE_DIR:-~}"
 
+# Source config file first so exported variables are available for defaults
 if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 fi
+
+SSH_CONFIG="${SESSION_MANAGER_SSH_CONFIG:-$HOME/.ssh/config}"
+REMOTE_CMD="${SESSION_MANAGER_REMOTE_CMD:-bash}"
+REMOTE_DIR="${SESSION_MANAGER_REMOTE_DIR:-~}"
+LOCAL_APP="${SESSION_MANAGER_LOCAL_APP:-}"
+FULLSCREEN="${SESSION_MANAGER_FULLSCREEN:-false}"
+
+# =============================================================================
+# RECENT DIRECTORIES - Track recently used directories per host
+# =============================================================================
+
+RECENTS_DIR="$CONFIG_DIR/recents"
+MAX_RECENTS=10
+
+# Ensure recents directory exists
+mkdir -p "$RECENTS_DIR" 2>/dev/null || true
+
+# Get recent directories for a host (returns newline-separated list)
+get_recent_dirs() {
+    local host="$1"
+    local recents_file="$RECENTS_DIR/$host"
+    if [ -f "$recents_file" ]; then
+        cat "$recents_file"
+    fi
+}
+
+# Add a directory to recent list for a host
+add_recent_dir() {
+    local host="$1"
+    local dir="$2"
+    local recents_file="$RECENTS_DIR/$host"
+
+    # Skip if dir is just ~ or empty
+    if [ -z "$dir" ] || [ "$dir" = "~" ]; then
+        return
+    fi
+
+    # Create temp file with new dir at top, removing duplicates
+    local temp_file="${recents_file}.tmp"
+    echo "$dir" > "$temp_file"
+
+    if [ -f "$recents_file" ]; then
+        # Add existing entries, excluding the one we just added
+        grep -v "^${dir}$" "$recents_file" 2>/dev/null >> "$temp_file" || true
+    fi
+
+    # Keep only MAX_RECENTS entries
+    head -n "$MAX_RECENTS" "$temp_file" > "$recents_file"
+    rm -f "$temp_file"
+}
+
+# Get the most recent directory for a host
+get_last_dir() {
+    local host="$1"
+    local recents_file="$RECENTS_DIR/$host"
+    if [ -f "$recents_file" ]; then
+        head -n 1 "$recents_file"
+    fi
+}
 
 # =============================================================================
 # SSH HOST REGISTRY (bash 3.2 compatible - using indexed arrays)
@@ -28,6 +85,104 @@ SSH_HOST_NAMES=()      # Host alias names
 SSH_HOST_HOSTNAMES=()  # Actual hostnames/IPs
 SSH_HOST_USERS=()      # Users for each host
 SSH_HOST_PORTS=()      # Ports for each host
+
+# =============================================================================
+# LOCAL APP REGISTRY (bash 3.2 compatible - using indexed arrays)
+# =============================================================================
+#
+# Commands can include {DIR} placeholder which gets replaced with the working
+# directory. This is useful for apps that need the directory as an argument
+# rather than just being started in that directory.
+#
+# Example: "claude --dangerously-skip-permissions {DIR}"
+#          becomes "claude --dangerously-skip-permissions /path/to/dir"
+
+LOCAL_APP_NAMES=()      # App names
+LOCAL_APP_CMDS=()       # Commands to run
+LOCAL_APP_DESCS=()      # Descriptions
+LOCAL_APP_ENVS=()       # Environment variables
+
+# Register a local app
+register_local_app() {
+    local app="$1"
+    local cmd="$2"
+    local desc="$3"
+    local envs="${4:-}"
+
+    LOCAL_APP_NAMES+=("$app")
+    LOCAL_APP_CMDS+=("$cmd")
+    LOCAL_APP_DESCS+=("$desc")
+    LOCAL_APP_ENVS+=("$envs")
+}
+
+# Get index for app name (-1 if not found)
+get_local_app_index() {
+    local app="$1"
+    local i=0
+    for a in "${LOCAL_APP_NAMES[@]}"; do
+        if [ "$a" = "$app" ]; then
+            echo "$i"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    echo "-1"
+    return 1
+}
+
+# Check if local app exists
+local_app_exists() {
+    local idx=$(get_local_app_index "$1")
+    [ "$idx" != "-1" ]
+}
+
+# Get app command
+get_local_app_cmd() {
+    local idx=$(get_local_app_index "$1")
+    if [ "$idx" != "-1" ]; then
+        echo "${LOCAL_APP_CMDS[$idx]}"
+    fi
+}
+
+# Get app description
+get_local_app_desc() {
+    local idx=$(get_local_app_index "$1")
+    if [ "$idx" != "-1" ]; then
+        echo "${LOCAL_APP_DESCS[$idx]}"
+    fi
+}
+
+# Get app environment variables
+get_local_app_env() {
+    local idx=$(get_local_app_index "$1")
+    if [ "$idx" != "-1" ]; then
+        echo "${LOCAL_APP_ENVS[$idx]}"
+    fi
+}
+
+# =============================================================================
+# BUILT-IN LOCAL APPS
+# =============================================================================
+
+# Interactive bash shell
+register_local_app "bash" "bash --login" \
+    "Interactive bash shell" \
+    ""
+
+# OpenCode editor (terminal TUI)
+register_local_app "opencode" "opencode" \
+    "OpenCode editor TUI" \
+    ""
+
+# Claude Code CLI - {DIR} is replaced with working directory
+register_local_app "claude" "claude --dangerously-skip-permissions {DIR}" \
+    "Claude Code CLI" \
+    "COLORTERM=truecolor"
+
+# AgentDeck - {DIR} is replaced with working directory
+register_local_app "agent-deck" "agent-deck {DIR}" \
+    "AgentDeck AI coding agent" \
+    "COLORTERM=truecolor"
 
 # =============================================================================
 # SSH CONFIG PARSER
@@ -212,6 +367,138 @@ check_remote_cmd() {
 }
 
 # =============================================================================
+# LOCAL SESSION MANAGEMENT
+# =============================================================================
+
+# Create local session for an app
+create_local_session() {
+    local app="$1"
+    local session_name="$2"
+    local work_dir="${3:-$PWD}"
+
+    if ! local_app_exists "$app"; then
+        print_error "Unknown local app: $app"
+        print_info "Use 'sm local-apps' to see available apps."
+        return 1
+    fi
+
+    local cmd=$(get_local_app_cmd "$app")
+    local envs=$(get_local_app_env "$app")
+    local desc=$(get_local_app_desc "$app")
+
+    print_info "Creating local session '$session_name'"
+    print_info "App: $app - $desc"
+    print_info "Directory: $work_dir"
+
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        print_warning "Session '$session_name' already exists, attaching..."
+        attach_session "$session_name"
+        return 0
+    fi
+
+    if [ ! -d "$work_dir" ]; then
+        print_error "Directory does not exist: $work_dir"
+        return 1
+    fi
+
+    # Substitute {DIR} placeholder with actual working directory
+    # This allows apps like claude to receive the directory as an argument
+    cmd="${cmd//\{DIR\}/$work_dir}"
+
+    local full_cmd=""
+    if [ -n "$envs" ]; then
+        full_cmd="export $envs && exec $cmd"
+    else
+        full_cmd="exec $cmd"
+    fi
+
+    tmux new-session -d -s "$session_name" -c "$work_dir" bash -c "$full_cmd"
+    print_success "Created local session '$session_name'"
+    print_info "Detach: Ctrl+B, D"
+}
+
+# Interactive local session creation
+create_local_session_interactive() {
+    echo ""
+    print_info "Create Local Session"
+    echo ""
+
+    if [ ${#LOCAL_APP_NAMES[@]} -eq 0 ]; then
+        print_warning "No local apps configured"
+        return 1
+    fi
+
+    echo "Available apps:"
+    local i=1
+    for app in "${LOCAL_APP_NAMES[@]}"; do
+        local desc=$(get_local_app_desc "$app")
+        printf "  [%2d] %-15s (%s)\n" "$i" "$app" "$desc"
+        i=$((i + 1))
+    done
+    echo ""
+
+    read -p "Select app: " app_choice
+
+    if ! echo "$app_choice" | grep -q "^[0-9]*$" || [ "$app_choice" -lt 1 ] || [ "$app_choice" -gt "${#LOCAL_APP_NAMES[@]}" ]; then
+        print_error "Invalid selection"
+        return 1
+    fi
+
+    local app="${LOCAL_APP_NAMES[$((app_choice-1))]}"
+
+    local default_name="$app-$(date +%H%M)"
+    read -p "Session name [$default_name]: " session_name
+    session_name="${session_name:-$default_name}"
+
+    local work_dir="$PWD"
+    read -p "Working directory [$work_dir]: " dir_input
+    dir_input="${dir_input:-$work_dir}"
+    dir_input="${dir_input/#\~/$HOME}"
+
+    create_local_session "$app" "$session_name" "$dir_input"
+
+    read -p "Attach to session now? [Y/n]: " attach
+    case "$attach" in
+        [Nn]*) ;;
+        *) attach_session "$session_name" ;;
+    esac
+}
+
+# List local apps
+list_local_apps() {
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════${NC}"
+    echo -e "${CYAN}Available Local Apps${NC}"
+    echo -e "${CYAN}════════════════════════════════════════${NC}"
+    echo ""
+
+    if [ ${#LOCAL_APP_NAMES[@]} -eq 0 ]; then
+        print_warning "No local apps configured"
+        return 1
+    fi
+
+    local i=1
+    for app in "${LOCAL_APP_NAMES[@]}"; do
+        local desc=$(get_local_app_desc "$app")
+        local default_marker=""
+        if [ "$app" = "$LOCAL_APP" ]; then
+            default_marker=" ${YELLOW}(default)${NC}"
+        fi
+        printf "  ${CYAN}[%2d]${NC} %-15s %s%b\n" "$i" "$app" "$desc" "$default_marker"
+        i=$((i + 1))
+    done
+
+    if [ -n "$LOCAL_APP" ]; then
+        echo ""
+        echo -e "  Default app: ${GREEN}$LOCAL_APP${NC} (used by 'sm .' and 'sm local')"
+    else
+        echo ""
+        echo "  No default app set. Run 'sm config' to set one."
+    fi
+    echo ""
+}
+
+# =============================================================================
 # REMOTE SESSION MANAGEMENT
 # =============================================================================
 
@@ -280,22 +567,35 @@ show_status() {
     echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
-    # Show local sessions
-    echo -e "${YELLOW}Local Sessions:${NC}"
-    local local_sessions
-    local_sessions=$(tmux list-sessions 2>/dev/null) || true
+    # Show all tmux sessions
+    echo -e "${YELLOW}Sessions:${NC}"
+    local all_sessions
+    all_sessions=$(tmux list-sessions 2>/dev/null) || true
 
-    if [ -z "$local_sessions" ]; then
-        echo "  No local tmux sessions"
+    if [ -z "$all_sessions" ]; then
+        echo "  No tmux sessions"
     else
-        echo "$local_sessions" | while read -r line; do
+        echo "$all_sessions" | while read -r line; do
             local sess_name=$(echo "$line" | cut -d: -f1)
             case "$sess_name" in
                 remote-*)
-                    echo "  ${GREEN}●${NC} $line"
+                    echo "  ${CYAN}●${NC} $line (remote)"
                     ;;
                 *)
-                    echo "  ${BLUE}●${NC} $line"
+                    # Check if it's a local app session
+                    local is_app=false
+                    for app in "${LOCAL_APP_NAMES[@]}"; do
+                        case "$sess_name" in
+                            $app|$app-*)
+                                echo "  ${GREEN}●${NC} $line (local: $app)"
+                                is_app=true
+                                break
+                                ;;
+                        esac
+                    done
+                    if [ "$is_app" = false ]; then
+                        echo "  ${BLUE}●${NC} $line"
+                    fi
                     ;;
             esac
         done
@@ -336,7 +636,12 @@ show_status() {
     echo ""
 
     echo -e "${YELLOW}Quick Commands:${NC}"
-    echo "  sm <host>                    Connect to host"
+    if [ -n "$LOCAL_APP" ]; then
+        echo "  sm .                         Start $LOCAL_APP in current directory"
+        echo "  sm local                     Start $LOCAL_APP (default)"
+    fi
+    echo "  sm local <app>               Start local app session"
+    echo "  sm <host>                    Connect to remote host"
     echo "  sm sessions <host>           List sessions on host"
     echo "  sm kill-remote <host> <sess> Kill remote session"
     echo ""
@@ -349,14 +654,20 @@ smart_connect() {
     local remote_dir="$3"
     local cmd="$4"
     local detach="$5"
+    local force_new="$6"
 
     # If session name provided, connect directly
     if [ -n "$session_name" ]; then
         local full_name="remote-$host-$session_name"
-        if tmux has-session -t "$full_name" 2>/dev/null; then
+        if tmux has-session -t "$full_name" 2>/dev/null && [ "$force_new" != "true" ]; then
             print_info "Attaching to existing session '$full_name'..."
             attach_session "$full_name"
         else
+            # If force_new and session exists, generate unique name
+            if [ "$force_new" = "true" ] && tmux has-session -t "$full_name" 2>/dev/null; then
+                full_name="remote-$host-$session_name-$(date +%H%M%S)"
+                print_info "Session exists, creating new: $full_name"
+            fi
             create_remote_session "$host" "$full_name" "$remote_dir" "$cmd"
             if [ "$detach" != "true" ]; then
                 attach_session "$full_name"
@@ -365,11 +676,13 @@ smart_connect() {
         return 0
     fi
 
-    # Check for existing local session for this host
-    local default_session="remote-$host"
-    if tmux has-session -t "$default_session" 2>/dev/null; then
-        print_info "Attaching to existing session '$default_session'..."
-        attach_session "$default_session"
+    # Force new session - use timestamp-based naming
+    if [ "$force_new" = "true" ]; then
+        local new_session="remote-$host-$(date +%H%M%S)"
+        create_remote_session "$host" "$new_session" "$remote_dir" "$cmd"
+        if [ "$detach" != "true" ]; then
+            attach_session "$new_session"
+        fi
         return 0
     fi
 
@@ -396,13 +709,17 @@ smart_connect() {
         echo "  [n] Create new session"
         echo ""
 
-        read -p "Select session: " choice
+        read -p "Select session (or 'n' for new): " choice
 
         if [ "$choice" = "n" ] || [ "$choice" = "N" ]; then
-            read -p "Session name: " new_name
-            create_remote_session "$host" "remote-$host-$new_name" "$remote_dir" "$cmd"
+            local new_session="remote-$host-$(date +%H%M%S)"
+            read -p "Session name [$new_session]: " new_name
+            if [ -n "$new_name" ]; then
+                new_session="remote-$host-$new_name"
+            fi
+            create_remote_session "$host" "$new_session" "$remote_dir" "$cmd"
             if [ "$detach" != "true" ]; then
-                attach_session "remote-$host-$new_name"
+                attach_session "$new_session"
             fi
         elif echo "$choice" | grep -q "^[0-9]*$" && [ "$choice" -ge 1 ] && [ "$choice" -le "${#matching_sessions[@]}" ]; then
             attach_session "${matching_sessions[$((choice-1))]}"
@@ -415,57 +732,14 @@ smart_connect() {
         print_info "Attaching to '${matching_sessions[0]}'..."
         attach_session "${matching_sessions[0]}"
     else
-        # No sessions - create new
-        create_remote_session "$host" "$default_session" "$remote_dir" "$cmd"
+        # No sessions - create new with timestamp for uniqueness
+        local new_session="remote-$host-$(date +%H%M%S)"
+        create_remote_session "$host" "$new_session" "$remote_dir" "$cmd"
         if [ "$detach" != "true" ]; then
-            attach_session "$default_session"
+            attach_session "$new_session"
         fi
     fi
 }
-
-# =============================================================================
-# LOCAL APP REGISTRY (commented out - using remote SSH hosts instead)
-# =============================================================================
-
-# declare -A APP_CMDS
-# declare -A APP_DESCS
-# declare -A APP_ENVS
-# declare -a APP_ORDER
-
-# Register an app with command, description, and optional environment variables
-# register_app() {
-#     local app="$1"
-#     local cmd="$2"
-#     local desc="$3"
-#     local envs="${4:-}"
-#
-#     APP_CMDS[$app]="$cmd"
-#     APP_DESCS[$app]="$desc"
-#     if [ -n "$envs" ]; then
-#         APP_ENVS[$app]="$envs"
-#     fi
-#
-#     APP_ORDER+=("$app")
-# }
-
-# =============================================================================
-# BUILT-IN APPS (commented out - using AgentDeck on remote hosts)
-# =============================================================================
-
-# # Interactive bash shell
-# register_app "bash" "bash --login" \
-#     "Interactive bash shell" \
-#     ""
-#
-# # OpenCode editor (terminal TUI)
-# register_app "opencode" "opencode" \
-#     "OpenCode editor TUI" \
-#     ""
-#
-# # Claude Code CLI - configure via env vars or config file
-# register_app "claude" "claude --dangerously-skip-permissions" \
-#     "Claude Code CLI" \
-#     "COLORTERM=truecolor ANTHROPIC_BASE_URL=\${SESSION_MANAGER_ANTHROPIC_BASE_URL:-https://api.anthropic.com} API_TIMEOUT_MS=\${SESSION_MANAGER_API_TIMEOUT_MS:-3000000} ANTHROPIC_DEFAULT_HAIKU_MODEL=\${SESSION_MANAGER_HAIKU_MODEL:-claude-3-5-haiku} ANTHROPIC_DEFAULT_SONNET_MODEL=\${SESSION_MANAGER_SONNET_MODEL:-claude-3-5-sonnet} ANTHROPIC_DEFAULT_OPUS_MODEL=\${SESSION_MANAGER_OPUS_MODEL:-claude-3-opus} ANTHROPIC_AUTH_TOKEN=\${SESSION_MANAGER_ANTHROPIC_AUTH_TOKEN}"
 
 # =============================================================================
 # CORE FUNCTIONALITY
@@ -531,7 +805,7 @@ create_remote_session() {
 
     print_info "Creating remote session '$session_name'"
     print_info "Host: $host ($(get_host_display "$host"))"
-    print_info "Remote tmux session: $remote_session"
+    print_info "Directory: $remote_dir"
     print_info "Command: $cmd"
 
     # Check if local session already exists
@@ -554,6 +828,10 @@ create_remote_session() {
 
     # Create local tmux session with SSH command
     tmux new-session -d -s "$session_name" bash -c "$ssh_cmd"
+
+    # Save directory to recents for this host
+    add_recent_dir "$host" "$remote_dir"
+
     print_success "Created remote session '$session_name'"
     print_info "Remote tmux session '$remote_session' on $host"
     print_info "Detach: Ctrl+B, D"
@@ -590,14 +868,54 @@ create_remote_session_interactive() {
 
     local host="${SSH_HOST_NAMES[$((host_choice-1))]}"
 
-    # Get session name
-    local default_name="remote-$host"
+    # Get session name (use timestamp by default)
+    local default_name="remote-$host-$(date +%H%M%S)"
     read -p "Session name [$default_name]: " session_name
     session_name="${session_name:-$default_name}"
 
-    # Get remote directory
-    read -p "Remote directory [$REMOTE_DIR]: " remote_dir
-    remote_dir="${remote_dir:-$REMOTE_DIR}"
+    # Get remote directory - show recents if available
+    local last_dir=$(get_last_dir "$host")
+    local default_dir="${last_dir:-$REMOTE_DIR}"
+    local recents=$(get_recent_dirs "$host")
+
+    if [ -n "$recents" ]; then
+        echo ""
+        echo "Recent directories for $host:"
+        local dir_array=()
+        local j=1
+        while IFS= read -r dir; do
+            dir_array+=("$dir")
+            printf "  [%d] %s\n" "$j" "$dir"
+            j=$((j + 1))
+        done <<< "$recents"
+        echo "  [n] Enter new directory"
+        echo ""
+
+        read -p "Select directory or enter path [$default_dir]: " dir_choice
+
+        case "$dir_choice" in
+            [0-9]*)
+                if [ "$dir_choice" -ge 1 ] && [ "$dir_choice" -le "${#dir_array[@]}" ]; then
+                    remote_dir="${dir_array[$((dir_choice-1))]}"
+                else
+                    remote_dir="$dir_choice"  # Treat as path
+                fi
+                ;;
+            n|N)
+                read -p "Enter directory path: " remote_dir
+                remote_dir="${remote_dir:-$REMOTE_DIR}"
+                ;;
+            "")
+                remote_dir="$default_dir"
+                ;;
+            *)
+                remote_dir="$dir_choice"  # Treat as path
+                ;;
+        esac
+    else
+        read -p "Remote directory [$REMOTE_DIR]: " remote_dir
+        remote_dir="${remote_dir:-$REMOTE_DIR}"
+    fi
 
     # Test connection option
     read -p "Test connection first? [y/N]: " test_conn
@@ -636,7 +954,28 @@ create_remote_session_interactive() {
 # Attach to session
 attach_session() {
     local session_name="$1"
+
+    # Trigger fullscreen mode on macOS if enabled
+    if [ "$FULLSCREEN" = "true" ] && [ "$(uname)" = "Darwin" ]; then
+        trigger_fullscreen &
+    fi
+
     tmux attach-session -t "$session_name"
+}
+
+# Trigger fullscreen mode on macOS Terminal
+trigger_fullscreen() {
+    # Small delay to ensure terminal window is ready
+    sleep 0.3
+    osascript -e '
+    tell application "System Events"
+        tell process "Terminal"
+            if exists menu item "Enter Full Screen" of menu "View" of menu bar 1 then
+                click menu item "Enter Full Screen" of menu "View" of menu bar 1
+            end if
+        end tell
+    end tell
+    ' 2>/dev/null || true
 }
 
 # Kill session
@@ -644,6 +983,65 @@ kill_session() {
     local session_name="$1"
     tmux kill-session -t "$session_name" 2>/dev/null
     print_success "Killed session '$session_name'"
+}
+
+# Rename session
+rename_session() {
+    local old_name="$1"
+    local new_name="$2"
+
+    if ! tmux has-session -t "$old_name" 2>/dev/null; then
+        print_error "Session '$old_name' not found"
+        return 1
+    fi
+
+    if tmux has-session -t "$new_name" 2>/dev/null; then
+        print_error "Session '$new_name' already exists"
+        return 1
+    fi
+
+    tmux rename-session -t "$old_name" "$new_name"
+    print_success "Renamed '$old_name' to '$new_name'"
+}
+
+# Rename session interactively
+rename_session_interactive() {
+    echo ""
+    print_info "Rename a session"
+    echo ""
+
+    local sessions=($(tmux list-sessions 2>/dev/null | sed 's/:.*$//'))
+
+    if [ ${#sessions[@]} -eq 0 ]; then
+        print_warning "No running sessions found"
+        return
+    fi
+
+    echo "Running sessions:"
+    local i=1
+    for sess in "${sessions[@]}"; do
+        echo "  [$i] $sess"
+        i=$((i + 1))
+    done
+    echo ""
+
+    read -p "Select session to rename (or 'q' to cancel): " choice
+
+    case "$choice" in
+        q|Q) return ;;
+    esac
+
+    if echo "$choice" | grep -q "^[0-9]*$" && [ "$choice" -ge 1 ] && [ "$choice" -le "${#sessions[@]}" ]; then
+        local selected="${sessions[$((choice-1))]}"
+        read -p "New name for '$selected': " new_name
+        if [ -n "$new_name" ]; then
+            rename_session "$selected" "$new_name"
+        else
+            print_error "No name provided"
+        fi
+    else
+        print_error "Invalid selection"
+    fi
 }
 
 # Show available sessions and let user pick
@@ -692,8 +1090,33 @@ show_main_menu() {
     echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
     echo ""
 
+    # Show local apps
+    local app_info="${#LOCAL_APP_NAMES[@]} available"
+    if [ -n "$LOCAL_APP" ]; then
+        app_info="$app_info, default: $LOCAL_APP"
+    fi
+    echo -e "${GREEN}Local Apps:${NC} $app_info"
+    if [ ${#LOCAL_APP_NAMES[@]} -gt 0 ]; then
+        local max_show=3
+        local shown=0
+        for app in "${LOCAL_APP_NAMES[@]}"; do
+            if [ $shown -ge $max_show ]; then
+                echo "  ${GREEN}...${NC} and $((${#LOCAL_APP_NAMES[@]} - max_show)) more"
+                break
+            fi
+            local desc=$(get_local_app_desc "$app")
+            local default_marker=""
+            if [ "$app" = "$LOCAL_APP" ]; then
+                default_marker=" ${YELLOW}(default)${NC}"
+            fi
+            echo -e "  ${GREEN}$app${NC} - $desc$default_marker"
+            shown=$((shown + 1))
+        done
+    fi
+    echo ""
+
     # Show available SSH hosts
-    echo "SSH Hosts: ${#SSH_HOST_NAMES[@]} configured"
+    echo -e "${CYAN}SSH Hosts:${NC} ${#SSH_HOST_NAMES[@]} configured"
     if [ ${#SSH_HOST_NAMES[@]} -gt 0 ]; then
         local max_show=5
         local shown=0
@@ -714,15 +1137,18 @@ show_main_menu() {
     echo ""
 
     echo "Options:"
-    echo "  [1] Connect to remote host"
-    echo "  [2] Attach to session"
-    echo "  [3] List local sessions"
-    echo "  [4] Kill local session"
-    echo "  [5] List SSH hosts"
-    echo "  [6] List remote sessions on host"
-    echo "  [7] Status dashboard"
-    echo "  [8] Test SSH connection"
-    echo "  [9] Configure"
+    echo "  ${GREEN}[1] Create local session${NC}"
+    echo "  ${CYAN}[2] Connect to remote host${NC}"
+    echo "  [3] Attach to session"
+    echo "  [4] List sessions"
+    echo "  [5] Kill session"
+    echo "  [6] Rename session"
+    echo "  [7] List local apps"
+    echo "  [8] List SSH hosts"
+    echo "  [9] List remote sessions on host"
+    echo "  [s] Status dashboard"
+    echo "  [t] Test SSH connection"
+    echo "  [c] Configure"
     echo "  [q] Quit"
     echo ""
 }
@@ -919,14 +1345,19 @@ test_ssh_interactive() {
 
 show_help() {
     cat << 'EOF'
-Usage: sm <host> [name]                   Start session on remote host
+Usage: sm <host> [name]                   Start remote session on SSH host
+   or: sm .                               Quick start default local app in current dir
+   or: sm local [app] [name]              Start local session (uses default if no app)
+   or: sm local-apps                      List available local apps
    or: sm hosts                           List available SSH hosts
+   or: sm recents [host]                  Show recent directories
    or: sm status                          Dashboard of all sessions
    or: sm sessions <host>                 List tmux sessions on remote host
    or: sm list                            List local tmux sessions
-   or: sm attach <name>                   Attach to local session
-   or: sm kill <name>                     Kill local session
+   or: sm attach <name>                   Attach to session
+   or: sm kill <name>                     Kill session
    or: sm kill-remote <host> <session>    Kill remote tmux session
+   or: sm rename <old> <new>              Rename a session
    or: sm info <name>                     Show session details
    or: sm restart <name>                  Restart a session
    or: sm test <host>                     Test SSH connection
@@ -936,30 +1367,56 @@ Usage: sm <host> [name]                   Start session on remote host
 
 Options:
   --detach, -d                        Create session without attaching
-  --dir <path>, -D <path>             Specify remote working directory
-  --cmd <command>                     Override default command (default: bash)
+  --new, -n                           Force create new session (don't attach to existing)
+  --dir <path>, -D <path>             Specify working directory (overrides last used)
 
-Session naming pattern: remote-<host>[-name]
-Example: sm myserver work  →  creates session "remote-myserver-work"
+Session naming patterns:
+  Local:  <app>-<name>                     (e.g., claude-myproject)
+  Remote: remote-<host>-<timestamp|name>   (e.g., remote-dev-143052)
 
-Examples:
-  sm dev                                   Connect to dev (creates or attaches)
+Local Session Examples:
+  sm .                                     Quick start default app in current directory
+  sm . myproject                           Quick start default app with session name
+  sm local                                 Start default local app (or interactive if none set)
+  sm local bash                            Start bash session
+  sm local claude                          Start Claude Code in current directory
+  sm local claude myproject                Named Claude session
+  sm local claude -D ~/code                Start Claude in specific directory
+  sm local opencode -D ~/code              Start opencode in specific directory
+  sm local-apps                            List available apps
+
+Remote Session Examples:
+  sm dev                                   Connect to dev (uses last directory)
+  sm dev -n                                Force new session on dev (timestamp named)
   sm dev project                           Named session on dev
+  sm dev project -n                        Force new session even if 'project' exists
   sm dev --detach                          Create without attaching
   sm dev -D ~/code                         Start in specific remote directory
-  sm dev --cmd htop                        Run htop instead of default
 
   sm status                                Show all sessions dashboard
   sm hosts                                 List available SSH hosts
+  sm recents                               Show recent directories for all hosts
+  sm recents dev                           Show recent directories for dev
   sm sessions dev                          List tmux sessions on dev
   sm list                                  List local sessions
 
-  sm attach remote-dev                     Attach to local session
-  sm kill remote-dev                       Kill local session
+  sm attach remote-dev-143052              Attach to local session
+  sm kill remote-dev-143052                Kill local session
   sm kill-remote dev mysession             Kill remote tmux session
 
   sm test dev                              Test SSH connection
   sm config                                Configure settings
+
+Concurrent Sessions:
+  Each invocation creates a unique session by default (timestamp-based naming).
+  When sessions exist for a host, you'll see a picker to choose or create new.
+  Use -n/--new to skip the picker and always create a new session.
+
+Recent Directories:
+  Session manager remembers the last 10 directories used per host.
+  When creating a new session, it automatically uses your last directory.
+  Use -D to override, or 'sm recents' to see saved directories.
+  Interactive mode shows recent directories as numbered options.
 
 Detaching:
   Ctrl+B, D                               Detach from session (keeps it running)
@@ -998,6 +1455,8 @@ Environment Variables:
   SESSION_MANAGER_SSH_CONFIG     SSH config file (default: ~/.ssh/config)
   SESSION_MANAGER_REMOTE_CMD     Command to run on remote (default: bash)
   SESSION_MANAGER_REMOTE_DIR     Default remote directory (default: ~)
+  SESSION_MANAGER_LOCAL_APP      Default local app for 'sm local' and 'sm .' (no default)
+  SESSION_MANAGER_FULLSCREEN     Auto fullscreen on attach (default: false, macOS only)
 
 EOF
 }
@@ -1044,10 +1503,35 @@ configure() {
         echo "export SESSION_MANAGER_REMOTE_CMD='$remote_cmd'" >> "$config_file"
     fi
 
+    # Show available local apps
+    echo ""
+    echo "Available local apps:"
+    for app in "${LOCAL_APP_NAMES[@]}"; do
+        local desc=$(get_local_app_desc "$app")
+        echo "  - $app ($desc)"
+    done
+    echo ""
+
+    read -p "Default local app (for 'sm local' and 'sm .'): " local_app
+    if [ -n "$local_app" ]; then
+        if local_app_exists "$local_app"; then
+            echo "export SESSION_MANAGER_LOCAL_APP='$local_app'" >> "$config_file"
+        else
+            print_warning "App '$local_app' not found, skipping"
+        fi
+    fi
+
     read -p "Default remote directory [~]: " remote_dir
     if [ -n "$remote_dir" ]; then
         echo "export SESSION_MANAGER_REMOTE_DIR='$remote_dir'" >> "$config_file"
     fi
+
+    read -p "Auto fullscreen on attach? (macOS only) [y/N]: " fullscreen
+    case "$fullscreen" in
+        [Yy]*)
+            echo "export SESSION_MANAGER_FULLSCREEN='true'" >> "$config_file"
+            ;;
+    esac
 
     chmod 600 "$config_file"
     print_success "Configuration saved to $config_file"
@@ -1082,24 +1566,35 @@ main() {
 
             case "$choice" in
                 1)
-                    create_remote_session_interactive
+                    create_local_session_interactive
                     ;;
                 2)
-                    show_sessions
+                    create_remote_session_interactive
                     ;;
                 3)
+                    show_sessions
+                    ;;
+                4)
                     list_all_sessions
                     read -p "Press Enter to continue..."
                     ;;
-                4)
+                5)
                     kill_session_interactive
                     read -p "Press Enter to continue..."
                     ;;
-                5)
+                6)
+                    rename_session_interactive
+                    read -p "Press Enter to continue..."
+                    ;;
+                7)
+                    list_local_apps
+                    read -p "Press Enter to continue..."
+                    ;;
+                8)
                     list_ssh_hosts
                     read -p "Press Enter to continue..."
                     ;;
-                6)
+                9)
                     # List remote sessions on a host
                     echo ""
                     print_info "List Remote Sessions"
@@ -1127,15 +1622,15 @@ main() {
                     fi
                     read -p "Press Enter to continue..."
                     ;;
-                7)
+                s|S)
                     show_status
                     read -p "Press Enter to continue..."
                     ;;
-                8)
+                t|T)
                     test_ssh_interactive
                     read -p "Press Enter to continue..."
                     ;;
-                9)
+                c|C)
                     configure
                     read -p "Press Enter to continue..."
                     ;;
@@ -1166,6 +1661,66 @@ main() {
             ;;
         hosts)
             list_ssh_hosts
+            exit 0
+            ;;
+        local-apps)
+            list_local_apps
+            exit 0
+            ;;
+        local)
+            # Handle: sm local <app> [name] [options]
+            local app="$1"
+            shift || true
+            local session_name=""
+            local work_dir="$PWD"
+
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --detach|-d) detach=true; shift ;;
+                    --dir|-D) work_dir="$2"; shift 2 ;;
+                    *)
+                        if [ -z "$session_name" ]; then
+                            session_name="$1"
+                        fi
+                        shift
+                        ;;
+                esac
+            done
+
+            # If no app specified, use configured default or fall back to interactive
+            if [ -z "$app" ]; then
+                if [ -n "$LOCAL_APP" ]; then
+                    app="$LOCAL_APP"
+                    print_info "Using default local app: $app"
+                else
+                    create_local_session_interactive
+                    exit 0
+                fi
+            fi
+
+            if ! local_app_exists "$app"; then
+                print_error "Unknown local app: $app"
+                list_local_apps
+                exit 1
+            fi
+
+            work_dir="${work_dir/#\~/$HOME}"
+            session_name="${session_name:-$(date +%H%M)}"
+            # Prepend app name if not already included
+            case "$session_name" in
+                $app|$app-*) ;;
+                *) session_name="$app-$session_name" ;;
+            esac
+
+            if tmux has-session -t "$session_name" 2>/dev/null; then
+                print_info "Attaching to existing session '$session_name'..."
+                attach_session "$session_name"
+            else
+                create_local_session "$app" "$session_name" "$work_dir"
+                if [ "$detach" != true ]; then
+                    attach_session "$session_name"
+                fi
+            fi
             exit 0
             ;;
         list)
@@ -1219,6 +1774,19 @@ main() {
             restart_session "$restart_name"
             exit 0
             ;;
+        rename)
+            local old_name="$1"
+            local new_name="$2"
+            if [ -z "$old_name" ]; then
+                rename_session_interactive
+            elif [ -z "$new_name" ]; then
+                print_error "Usage: sm rename <old-name> <new-name>"
+                exit 1
+            else
+                rename_session "$old_name" "$new_name"
+            fi
+            exit 0
+            ;;
         test)
             local test_host="$1"
             if [ -z "$test_host" ]; then
@@ -1255,10 +1823,104 @@ main() {
             kill_remote_session "$kr_host" "$kr_session"
             exit 0
             ;;
+        .)
+            # Quick shortcut: sm . launches default local app in current directory
+            if [ -z "$LOCAL_APP" ]; then
+                print_error "No default local app configured"
+                print_info "Set SESSION_MANAGER_LOCAL_APP in your config"
+                print_info "Run 'sm config' to configure, or 'sm local-apps' to see available apps"
+                exit 1
+            fi
+
+            if ! local_app_exists "$LOCAL_APP"; then
+                print_error "Configured default app '$LOCAL_APP' is not registered"
+                list_local_apps
+                exit 1
+            fi
+
+            local work_dir="$PWD"
+            local session_name=""
+
+            # Parse remaining arguments
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --detach|-d) detach=true; shift ;;
+                    --dir|-D) work_dir="$2"; shift 2 ;;
+                    *)
+                        if [ -z "$session_name" ]; then
+                            session_name="$1"
+                        fi
+                        shift
+                        ;;
+                esac
+            done
+
+            work_dir="${work_dir/#\~/$HOME}"
+            session_name="${session_name:-$(date +%H%M)}"
+            case "$session_name" in
+                $LOCAL_APP|$LOCAL_APP-*) ;;
+                *) session_name="$LOCAL_APP-$session_name" ;;
+            esac
+
+            if tmux has-session -t "$session_name" 2>/dev/null; then
+                print_info "Attaching to existing session '$session_name'..."
+                attach_session "$session_name"
+            else
+                create_local_session "$LOCAL_APP" "$session_name" "$work_dir"
+                if [ "$detach" != true ]; then
+                    attach_session "$session_name"
+                fi
+            fi
+            exit 0
+            ;;
+        recents)
+            local recents_host="$1"
+            if [ -z "$recents_host" ]; then
+                # Show recents for all hosts
+                echo ""
+                echo -e "${CYAN}════════════════════════════════════════${NC}"
+                echo -e "${CYAN}Recent Directories by Host${NC}"
+                echo -e "${CYAN}════════════════════════════════════════${NC}"
+                echo ""
+                local found=false
+                for host in "${SSH_HOST_NAMES[@]}"; do
+                    local dirs=$(get_recent_dirs "$host")
+                    if [ -n "$dirs" ]; then
+                        found=true
+                        echo -e "${GREEN}$host:${NC}"
+                        echo "$dirs" | while read -r dir; do
+                            echo "  $dir"
+                        done
+                        echo ""
+                    fi
+                done
+                if [ "$found" = false ]; then
+                    echo "  No recent directories recorded yet."
+                    echo "  Directories are saved when you create remote sessions."
+                fi
+                echo ""
+            else
+                # Show recents for specific host
+                echo ""
+                echo -e "${CYAN}Recent directories for $recents_host:${NC}"
+                local dirs=$(get_recent_dirs "$recents_host")
+                if [ -n "$dirs" ]; then
+                    echo "$dirs" | while read -r dir; do
+                        echo "  $dir"
+                    done
+                else
+                    echo "  No recent directories for $recents_host"
+                fi
+                echo ""
+            fi
+            exit 0
+            ;;
         *)
             # Treat first arg as host name, parse remaining args for flags
             local host="$cmd"
             local session_name=""
+            local force_new=false
+            local dir_specified=false
 
             # Parse arguments
             while [ $# -gt 0 ]; do
@@ -1267,8 +1929,13 @@ main() {
                         detach=true
                         shift
                         ;;
+                    --new|-n)
+                        force_new=true
+                        shift
+                        ;;
                     --dir|-D)
                         remote_dir="$2"
+                        dir_specified=true
                         shift 2
                         ;;
                     --cmd)
@@ -1292,6 +1959,14 @@ main() {
                 exit 1
             fi
 
+            # Use last directory for this host if no explicit -D provided
+            if [ "$dir_specified" = false ]; then
+                local last_dir=$(get_last_dir "$host")
+                if [ -n "$last_dir" ]; then
+                    remote_dir="$last_dir"
+                fi
+            fi
+
             # Use custom command if provided
             local cmd_to_run="${custom_cmd:-$REMOTE_CMD}"
 
@@ -1301,7 +1976,12 @@ main() {
                 detach_flag="true"
             fi
 
-            smart_connect "$host" "$session_name" "$remote_dir" "$cmd_to_run" "$detach_flag"
+            local force_new_flag="false"
+            if [ "$force_new" = true ]; then
+                force_new_flag="true"
+            fi
+
+            smart_connect "$host" "$session_name" "$remote_dir" "$cmd_to_run" "$detach_flag" "$force_new_flag"
             exit 0
             ;;
     esac
