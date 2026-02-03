@@ -11,13 +11,15 @@ VERSION="2.1.0"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/session-manager"
 CONFIG_FILE="$CONFIG_DIR/config"
-SSH_CONFIG="${SESSION_MANAGER_SSH_CONFIG:-$HOME/.ssh/config}"
-REMOTE_CMD="${SESSION_MANAGER_REMOTE_CMD:-bash}"
-REMOTE_DIR="${SESSION_MANAGER_REMOTE_DIR:-~}"
 
+# Source config file first so exported variables are available for defaults
 if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 fi
+
+SSH_CONFIG="${SESSION_MANAGER_SSH_CONFIG:-$HOME/.ssh/config}"
+REMOTE_CMD="${SESSION_MANAGER_REMOTE_CMD:-bash}"
+REMOTE_DIR="${SESSION_MANAGER_REMOTE_DIR:-~}"
 
 # =============================================================================
 # SSH HOST REGISTRY (bash 3.2 compatible - using indexed arrays)
