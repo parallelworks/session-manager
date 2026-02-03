@@ -3,7 +3,7 @@
 
 set -e
 
-VERSION="2.3.0"
+VERSION="2.4.0"
 
 # =============================================================================
 # CONFIGURATION - Load config file if exists
@@ -35,6 +35,13 @@ SSH_HOST_PORTS=()      # Ports for each host
 # =============================================================================
 # LOCAL APP REGISTRY (bash 3.2 compatible - using indexed arrays)
 # =============================================================================
+#
+# Commands can include {DIR} placeholder which gets replaced with the working
+# directory. This is useful for apps that need the directory as an argument
+# rather than just being started in that directory.
+#
+# Example: "claude --dangerously-skip-permissions {DIR}"
+#          becomes "claude --dangerously-skip-permissions /path/to/dir"
 
 LOCAL_APP_NAMES=()      # App names
 LOCAL_APP_CMDS=()       # Commands to run
@@ -113,8 +120,8 @@ register_local_app "opencode" "opencode" \
     "OpenCode editor TUI" \
     ""
 
-# Claude Code CLI
-register_local_app "claude" "claude --dangerously-skip-permissions" \
+# Claude Code CLI - {DIR} is replaced with working directory
+register_local_app "claude" "claude --dangerously-skip-permissions {DIR}" \
     "Claude Code CLI" \
     "COLORTERM=truecolor"
 
@@ -334,6 +341,10 @@ create_local_session() {
         print_error "Directory does not exist: $work_dir"
         return 1
     fi
+
+    # Substitute {DIR} placeholder with actual working directory
+    # This allows apps like claude to receive the directory as an argument
+    cmd="${cmd//\{DIR\}/$work_dir}"
 
     local full_cmd=""
     if [ -n "$envs" ]; then
@@ -568,14 +579,20 @@ smart_connect() {
     local remote_dir="$3"
     local cmd="$4"
     local detach="$5"
+    local force_new="$6"
 
     # If session name provided, connect directly
     if [ -n "$session_name" ]; then
         local full_name="remote-$host-$session_name"
-        if tmux has-session -t "$full_name" 2>/dev/null; then
+        if tmux has-session -t "$full_name" 2>/dev/null && [ "$force_new" != "true" ]; then
             print_info "Attaching to existing session '$full_name'..."
             attach_session "$full_name"
         else
+            # If force_new and session exists, generate unique name
+            if [ "$force_new" = "true" ] && tmux has-session -t "$full_name" 2>/dev/null; then
+                full_name="remote-$host-$session_name-$(date +%H%M%S)"
+                print_info "Session exists, creating new: $full_name"
+            fi
             create_remote_session "$host" "$full_name" "$remote_dir" "$cmd"
             if [ "$detach" != "true" ]; then
                 attach_session "$full_name"
@@ -584,11 +601,13 @@ smart_connect() {
         return 0
     fi
 
-    # Check for existing local session for this host
-    local default_session="remote-$host"
-    if tmux has-session -t "$default_session" 2>/dev/null; then
-        print_info "Attaching to existing session '$default_session'..."
-        attach_session "$default_session"
+    # Force new session - use timestamp-based naming
+    if [ "$force_new" = "true" ]; then
+        local new_session="remote-$host-$(date +%H%M%S)"
+        create_remote_session "$host" "$new_session" "$remote_dir" "$cmd"
+        if [ "$detach" != "true" ]; then
+            attach_session "$new_session"
+        fi
         return 0
     fi
 
@@ -615,13 +634,17 @@ smart_connect() {
         echo "  [n] Create new session"
         echo ""
 
-        read -p "Select session: " choice
+        read -p "Select session (or 'n' for new): " choice
 
         if [ "$choice" = "n" ] || [ "$choice" = "N" ]; then
-            read -p "Session name: " new_name
-            create_remote_session "$host" "remote-$host-$new_name" "$remote_dir" "$cmd"
+            local new_session="remote-$host-$(date +%H%M%S)"
+            read -p "Session name [$new_session]: " new_name
+            if [ -n "$new_name" ]; then
+                new_session="remote-$host-$new_name"
+            fi
+            create_remote_session "$host" "$new_session" "$remote_dir" "$cmd"
             if [ "$detach" != "true" ]; then
-                attach_session "remote-$host-$new_name"
+                attach_session "$new_session"
             fi
         elif echo "$choice" | grep -q "^[0-9]*$" && [ "$choice" -ge 1 ] && [ "$choice" -le "${#matching_sessions[@]}" ]; then
             attach_session "${matching_sessions[$((choice-1))]}"
@@ -634,10 +657,11 @@ smart_connect() {
         print_info "Attaching to '${matching_sessions[0]}'..."
         attach_session "${matching_sessions[0]}"
     else
-        # No sessions - create new
-        create_remote_session "$host" "$default_session" "$remote_dir" "$cmd"
+        # No sessions - create new with timestamp for uniqueness
+        local new_session="remote-$host-$(date +%H%M%S)"
+        create_remote_session "$host" "$new_session" "$remote_dir" "$cmd"
         if [ "$detach" != "true" ]; then
-            attach_session "$default_session"
+            attach_session "$new_session"
         fi
     fi
 }
@@ -1214,22 +1238,26 @@ Usage: sm <host> [name]                   Start remote session on SSH host
 
 Options:
   --detach, -d                        Create session without attaching
+  --new, -n                           Force create new session (don't attach to existing)
   --dir <path>, -D <path>             Specify working directory
 
 Session naming patterns:
-  Local:  <app>-<name>           (e.g., claude-myproject)
-  Remote: remote-<host>[-name]   (e.g., remote-dev-myproject)
+  Local:  <app>-<name>                     (e.g., claude-myproject)
+  Remote: remote-<host>-<timestamp|name>   (e.g., remote-dev-143052)
 
 Local Session Examples:
   sm local bash                            Start bash session
-  sm local claude                          Start Claude Code session
+  sm local claude                          Start Claude Code in current directory
   sm local claude myproject                Named Claude session
+  sm local claude -D ~/code                Start Claude in specific directory
   sm local opencode -D ~/code              Start opencode in specific directory
   sm local-apps                            List available apps
 
 Remote Session Examples:
-  sm dev                                   Connect to dev (creates or attaches)
+  sm dev                                   Connect to dev (shows picker if sessions exist)
+  sm dev -n                                Force new session on dev (timestamp named)
   sm dev project                           Named session on dev
+  sm dev project -n                        Force new session even if 'project' exists
   sm dev --detach                          Create without attaching
   sm dev -D ~/code                         Start in specific remote directory
 
@@ -1238,12 +1266,17 @@ Remote Session Examples:
   sm sessions dev                          List tmux sessions on dev
   sm list                                  List local sessions
 
-  sm attach remote-dev                     Attach to local session
-  sm kill remote-dev                       Kill local session
+  sm attach remote-dev-143052              Attach to local session
+  sm kill remote-dev-143052                Kill local session
   sm kill-remote dev mysession             Kill remote tmux session
 
   sm test dev                              Test SSH connection
   sm config                                Configure settings
+
+Concurrent Sessions:
+  Each invocation creates a unique session by default (timestamp-based naming).
+  When sessions exist for a host, you'll see a picker to choose or create new.
+  Use -n/--new to skip the picker and always create a new session.
 
 Detaching:
   Ctrl+B, D                               Detach from session (keeps it running)
@@ -1629,12 +1662,17 @@ main() {
             # Treat first arg as host name, parse remaining args for flags
             local host="$cmd"
             local session_name=""
+            local force_new=false
 
             # Parse arguments
             while [ $# -gt 0 ]; do
                 case "$1" in
                     --detach|-d)
                         detach=true
+                        shift
+                        ;;
+                    --new|-n)
+                        force_new=true
                         shift
                         ;;
                     --dir|-D)
@@ -1671,7 +1709,12 @@ main() {
                 detach_flag="true"
             fi
 
-            smart_connect "$host" "$session_name" "$remote_dir" "$cmd_to_run" "$detach_flag"
+            local force_new_flag="false"
+            if [ "$force_new" = true ]; then
+                force_new_flag="true"
+            fi
+
+            smart_connect "$host" "$session_name" "$remote_dir" "$cmd_to_run" "$detach_flag" "$force_new_flag"
             exit 0
             ;;
     esac
