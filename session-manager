@@ -178,6 +178,11 @@ register_local_app "claude" "claude --dangerously-skip-permissions {DIR}" \
     "Claude Code CLI" \
     "COLORTERM=truecolor"
 
+# AgentDeck - {DIR} is replaced with working directory
+register_local_app "agent-deck" "agent-deck {DIR}" \
+    "AgentDeck AI coding agent" \
+    "COLORTERM=truecolor"
+
 # =============================================================================
 # SSH CONFIG PARSER
 # =============================================================================
